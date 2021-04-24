@@ -107,6 +107,7 @@ func Test_LoadServerCommonConf(t *testing.T) {
 				BindUDPPort:            7008,
 				KCPBindPort:            7007,
 				ProxyBindAddr:          "127.0.0.9",
+				VhostBindAddr:          "127.0.0.9",
 				VhostHTTPPort:          89,
 				VhostHTTPSPort:         449,
 				VhostHTTPTimeout:       69,
