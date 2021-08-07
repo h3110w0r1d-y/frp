@@ -22,7 +22,7 @@
     export default {
         data() {
             return {
-                status: null
+                status: new Array(),
             }
         },
         created() {
@@ -51,6 +51,9 @@
                     this.status.push(s)
                 }
                 for (let s of json.stcp) {
+                    this.status.push(s)
+                }
+                for (let s of json.sudp) {
                     this.status.push(s)
                 }
                 for (let s of json.xtcp) {
