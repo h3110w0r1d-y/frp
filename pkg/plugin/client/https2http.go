@@ -23,6 +23,7 @@ import (
 	"net/http/httputil"
 	"strings"
 
+	"github.com/fatedier/frp/pkg/transport"
 	frpNet "github.com/fatedier/frp/pkg/util/net"
 )
 
@@ -58,12 +59,6 @@ func NewHTTPS2HTTPPlugin(params map[string]string) (Plugin, error) {
 		}
 	}
 
-	if crtPath == "" {
-		return nil, fmt.Errorf("plugin_crt_path is required")
-	}
-	if keyPath == "" {
-		return nil, fmt.Errorf("plugin_key_path is required")
-	}
 	if localAddr == "" {
 		return nil, fmt.Errorf("plugin_local_addr is required")
 	}
@@ -96,13 +91,24 @@ func NewHTTPS2HTTPPlugin(params map[string]string) (Plugin, error) {
 		Handler: rp,
 	}
 
-	tlsConfig, err := p.genTLSConfig()
+	var (
+		tlsConfig *tls.Config
+		err       error
+	)
+	if crtPath != "" || keyPath != "" {
+		tlsConfig, err = p.genTLSConfig()
+	} else {
+		tlsConfig, err = transport.NewServerTLSConfig("", "", "")
+		tlsConfig.InsecureSkipVerify = true
+	}
 	if err != nil {
 		return nil, fmt.Errorf("gen TLS config error: %v", err)
 	}
 	ln := tls.NewListener(listener, tlsConfig)
 
-	go p.s.Serve(ln)
+	go func() {
+		_ = p.s.Serve(ln)
+	}()
 	return p, nil
 }
 
@@ -118,7 +124,7 @@ func (p *HTTPS2HTTPPlugin) genTLSConfig() (*tls.Config, error) {
 
 func (p *HTTPS2HTTPPlugin) Handle(conn io.ReadWriteCloser, realConn net.Conn, extraBufToLocal []byte) {
 	wrapConn := frpNet.WrapReadWriteCloserToConn(conn, realConn)
-	p.l.PutConn(wrapConn)
+	_ = p.l.PutConn(wrapConn)
 }
 
 func (p *HTTPS2HTTPPlugin) Name() string {

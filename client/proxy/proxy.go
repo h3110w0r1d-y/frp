@@ -17,14 +17,20 @@ package proxy
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"io"
-	"io/ioutil"
 	"net"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/fatedier/golib/errors"
+	frpIo "github.com/fatedier/golib/io"
+	libdial "github.com/fatedier/golib/net/dial"
+	"github.com/fatedier/golib/pool"
+	fmux "github.com/hashicorp/yamux"
+	pp "github.com/pires/go-proxyproto"
+	"golang.org/x/time/rate"
 
 	"github.com/fatedier/frp/pkg/config"
 	"github.com/fatedier/frp/pkg/msg"
@@ -33,13 +39,6 @@ import (
 	"github.com/fatedier/frp/pkg/util/limit"
 	frpNet "github.com/fatedier/frp/pkg/util/net"
 	"github.com/fatedier/frp/pkg/util/xlog"
-
-	"github.com/fatedier/golib/errors"
-	frpIo "github.com/fatedier/golib/io"
-	"github.com/fatedier/golib/pool"
-	fmux "github.com/hashicorp/yamux"
-	pp "github.com/pires/go-proxyproto"
-	"golang.org/x/time/rate"
 )
 
 // Proxy defines how to handle work connections for different proxy type.
@@ -307,7 +306,7 @@ func (pxy *XTCPProxy) InWorkConn(conn net.Conn, m *msg.StartWorkConn) {
 		Sid:       natHoleSidMsg.Sid,
 	}
 	raddr, _ := net.ResolveUDPAddr("udp",
-		fmt.Sprintf("%s:%d", pxy.clientCfg.ServerAddr, pxy.serverUDPPort))
+		net.JoinHostPort(pxy.clientCfg.ServerAddr, strconv.Itoa(pxy.serverUDPPort)))
 	clientConn, err := net.DialUDP("udp", nil, raddr)
 	if err != nil {
 		xl.Error("dial server udp addr error: %v", err)
@@ -323,7 +322,7 @@ func (pxy *XTCPProxy) InWorkConn(conn net.Conn, m *msg.StartWorkConn) {
 
 	// Wait for client address at most 5 seconds.
 	var natHoleRespMsg msg.NatHoleResp
-	clientConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_ = clientConn.SetReadDeadline(time.Now().Add(5 * time.Second))
 
 	buf := pool.GetBuf(1024)
 	n, err := clientConn.Read(buf)
@@ -336,8 +335,8 @@ func (pxy *XTCPProxy) InWorkConn(conn net.Conn, m *msg.StartWorkConn) {
 		xl.Error("get natHoleRespMsg error: %v", err)
 		return
 	}
-	clientConn.SetReadDeadline(time.Time{})
-	clientConn.Close()
+	_ = clientConn.SetReadDeadline(time.Time{})
+	_ = clientConn.Close()
 
 	if natHoleRespMsg.Error != "" {
 		xl.Error("natHoleRespMsg get error info: %s", natHoleRespMsg.Error)
@@ -347,35 +346,34 @@ func (pxy *XTCPProxy) InWorkConn(conn net.Conn, m *msg.StartWorkConn) {
 	xl.Trace("get natHoleRespMsg, sid [%s], client address [%s] visitor address [%s]", natHoleRespMsg.Sid, natHoleRespMsg.ClientAddr, natHoleRespMsg.VisitorAddr)
 
 	// Send detect message
-	array := strings.Split(natHoleRespMsg.VisitorAddr, ":")
-	if len(array) <= 1 {
-		xl.Error("get NatHoleResp visitor address error: %v", natHoleRespMsg.VisitorAddr)
+	host, portStr, err := net.SplitHostPort(natHoleRespMsg.VisitorAddr)
+	if err != nil {
+		xl.Error("get NatHoleResp visitor address [%s] error: %v", natHoleRespMsg.VisitorAddr, err)
 	}
 	laddr, _ := net.ResolveUDPAddr("udp", clientConn.LocalAddr().String())
-	/*
-		for i := 1000; i < 65000; i++ {
-			pxy.sendDetectMsg(array[0], int64(i), laddr, "a")
-		}
-	*/
-	port, err := strconv.ParseInt(array[1], 10, 64)
+
+	port, err := strconv.ParseInt(portStr, 10, 64)
 	if err != nil {
 		xl.Error("get natHoleResp visitor address error: %v", natHoleRespMsg.VisitorAddr)
 		return
 	}
-	pxy.sendDetectMsg(array[0], int(port), laddr, []byte(natHoleRespMsg.Sid))
+	_ = pxy.sendDetectMsg(host, int(port), laddr, []byte(natHoleRespMsg.Sid))
 	xl.Trace("send all detect msg done")
 
-	msg.WriteMsg(conn, &msg.NatHoleClientDetectOK{})
+	if err := msg.WriteMsg(conn, &msg.NatHoleClientDetectOK{}); err != nil {
+		xl.Error("write message error: %v", err)
+		return
+	}
 
 	// Listen for clientConn's address and wait for visitor connection
 	lConn, err := net.ListenUDP("udp", laddr)
 	if err != nil {
-		xl.Error("listen on visitorConn's local adress error: %v", err)
+		xl.Error("listen on visitorConn's local address error: %v", err)
 		return
 	}
 	defer lConn.Close()
 
-	lConn.SetReadDeadline(time.Now().Add(8 * time.Second))
+	_ = lConn.SetReadDeadline(time.Now().Add(8 * time.Second))
 	sidBuf := pool.GetBuf(1024)
 	var uAddr *net.UDPAddr
 	n, uAddr, err = lConn.ReadFromUDP(sidBuf)
@@ -383,7 +381,7 @@ func (pxy *XTCPProxy) InWorkConn(conn net.Conn, m *msg.StartWorkConn) {
 		xl.Warn("get sid from visitor error: %v", err)
 		return
 	}
-	lConn.SetReadDeadline(time.Time{})
+	_ = lConn.SetReadDeadline(time.Time{})
 	if string(sidBuf[:n]) != natHoleRespMsg.Sid {
 		xl.Warn("incorrect sid from visitor")
 		return
@@ -391,7 +389,10 @@ func (pxy *XTCPProxy) InWorkConn(conn net.Conn, m *msg.StartWorkConn) {
 	pool.PutBuf(sidBuf)
 	xl.Info("nat hole connection make success, sid [%s]", natHoleRespMsg.Sid)
 
-	lConn.WriteToUDP(sidBuf[:n], uAddr)
+	if _, err := lConn.WriteToUDP(sidBuf[:n], uAddr); err != nil {
+		xl.Error("write uaddr error: %v", err)
+		return
+	}
 
 	kcpConn, err := frpNet.NewKCPConnFromUDP(lConn, false, uAddr.String())
 	if err != nil {
@@ -401,7 +402,7 @@ func (pxy *XTCPProxy) InWorkConn(conn net.Conn, m *msg.StartWorkConn) {
 
 	fmuxCfg := fmux.DefaultConfig()
 	fmuxCfg.KeepAliveInterval = 5 * time.Second
-	fmuxCfg.LogOutput = ioutil.Discard
+	fmuxCfg.LogOutput = io.Discard
 	sess, err := fmux.Server(kcpConn, fmuxCfg)
 	if err != nil {
 		xl.Error("create yamux server from kcp connection error: %v", err)
@@ -419,7 +420,7 @@ func (pxy *XTCPProxy) InWorkConn(conn net.Conn, m *msg.StartWorkConn) {
 }
 
 func (pxy *XTCPProxy) sendDetectMsg(addr string, port int, laddr *net.UDPAddr, content []byte) (err error) {
-	daddr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", addr, port))
+	daddr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(addr, strconv.Itoa(port)))
 	if err != nil {
 		return err
 	}
@@ -429,12 +430,13 @@ func (pxy *XTCPProxy) sendDetectMsg(addr string, port int, laddr *net.UDPAddr, c
 		return err
 	}
 
-	//uConn := ipv4.NewConn(tConn)
-	//uConn.SetTTL(3)
+	// uConn := ipv4.NewConn(tConn)
+	// uConn.SetTTL(3)
 
-	tConn.Write(content)
-	tConn.Close()
-	return nil
+	if _, err := tConn.Write(content); err != nil {
+		return err
+	}
+	return tConn.Close()
 }
 
 // UDP
@@ -452,7 +454,7 @@ type UDPProxy struct {
 }
 
 func (pxy *UDPProxy) Run() (err error) {
-	pxy.localAddr, err = net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", pxy.cfg.LocalIP, pxy.cfg.LocalPort))
+	pxy.localAddr, err = net.ResolveUDPAddr("udp", net.JoinHostPort(pxy.cfg.LocalIP, strconv.Itoa(pxy.cfg.LocalPort)))
 	if err != nil {
 		return
 	}
@@ -544,7 +546,7 @@ func (pxy *UDPProxy) InWorkConn(conn net.Conn, m *msg.StartWorkConn) {
 			}
 		}
 	}
-	heartbeatFn := func(conn net.Conn, sendCh chan msg.Message) {
+	heartbeatFn := func(sendCh chan msg.Message) {
 		var errRet error
 		for {
 			time.Sleep(time.Duration(30) * time.Second)
@@ -559,7 +561,7 @@ func (pxy *UDPProxy) InWorkConn(conn net.Conn, m *msg.StartWorkConn) {
 
 	go workConnSenderFn(pxy.workConn, pxy.sendCh)
 	go workConnReaderFn(pxy.workConn, pxy.readCh)
-	go heartbeatFn(pxy.workConn, pxy.sendCh)
+	go heartbeatFn(pxy.sendCh)
 	udp.Forwarder(pxy.localAddr, pxy.readCh, pxy.sendCh, int(pxy.clientCfg.UDPPacketSize))
 }
 
@@ -574,7 +576,7 @@ type SUDPProxy struct {
 }
 
 func (pxy *SUDPProxy) Run() (err error) {
-	pxy.localAddr, err = net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", pxy.cfg.LocalIP, pxy.cfg.LocalPort))
+	pxy.localAddr, err = net.ResolveUDPAddr("udp", net.JoinHostPort(pxy.cfg.LocalIP, strconv.Itoa(pxy.cfg.LocalPort)))
 	if err != nil {
 		return
 	}
@@ -690,7 +692,7 @@ func (pxy *SUDPProxy) InWorkConn(conn net.Conn, m *msg.StartWorkConn) {
 		}
 	}
 
-	heartbeatFn := func(conn net.Conn, sendCh chan msg.Message) {
+	heartbeatFn := func(sendCh chan msg.Message) {
 		ticker := time.NewTicker(30 * time.Second)
 		defer func() {
 			ticker.Stop()
@@ -716,14 +718,15 @@ func (pxy *SUDPProxy) InWorkConn(conn net.Conn, m *msg.StartWorkConn) {
 
 	go workConnSenderFn(workConn, sendCh)
 	go workConnReaderFn(workConn, readCh)
-	go heartbeatFn(workConn, sendCh)
+	go heartbeatFn(sendCh)
 
 	udp.Forwarder(pxy.localAddr, readCh, sendCh, int(pxy.clientCfg.UDPPacketSize))
 }
 
 // Common handler for tcp work connections.
 func HandleTCPWorkConnection(ctx context.Context, localInfo *config.LocalSvrConf, proxyPlugin plugin.Plugin,
-	baseInfo *config.BaseProxyConf, limiter *rate.Limiter, workConn net.Conn, encKey []byte, m *msg.StartWorkConn) {
+	baseInfo *config.BaseProxyConf, limiter *rate.Limiter, workConn net.Conn, encKey []byte, m *msg.StartWorkConn,
+) {
 	xl := xlog.FromContextSafe(ctx)
 	var (
 		remote io.ReadWriteCloser
@@ -778,7 +781,7 @@ func HandleTCPWorkConnection(ctx context.Context, localInfo *config.LocalSvrConf
 			}
 
 			buf := bytes.NewBuffer(nil)
-			h.WriteTo(buf)
+			_, _ = h.WriteTo(buf)
 			extraInfo = buf.Bytes()
 		}
 	}
@@ -791,7 +794,10 @@ func HandleTCPWorkConnection(ctx context.Context, localInfo *config.LocalSvrConf
 		return
 	}
 
-	localConn, err := frpNet.ConnectServer("tcp", fmt.Sprintf("%s:%d", localInfo.LocalIP, localInfo.LocalPort))
+	localConn, err := libdial.Dial(
+		net.JoinHostPort(localInfo.LocalIP, strconv.Itoa(localInfo.LocalPort)),
+		libdial.WithTimeout(10*time.Second),
+	)
 	if err != nil {
 		workConn.Close()
 		xl.Error("connect to local service [%s:%d] error: %v", localInfo.LocalIP, localInfo.LocalPort, err)
@@ -802,7 +808,11 @@ func HandleTCPWorkConnection(ctx context.Context, localInfo *config.LocalSvrConf
 		localConn.RemoteAddr().String(), workConn.LocalAddr().String(), workConn.RemoteAddr().String())
 
 	if len(extraInfo) > 0 {
-		localConn.Write(extraInfo)
+		if _, err := localConn.Write(extraInfo); err != nil {
+			workConn.Close()
+			xl.Error("write extraInfo to local conn error: %v", err)
+			return
+		}
 	}
 
 	frpIo.Join(localConn, remote)

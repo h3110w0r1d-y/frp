@@ -20,10 +20,10 @@ import (
 	"path/filepath"
 	"strings"
 
+	"gopkg.in/ini.v1"
+
 	"github.com/fatedier/frp/pkg/auth"
 	"github.com/fatedier/frp/pkg/util/util"
-
-	"gopkg.in/ini.v1"
 )
 
 // ClientCommonConf contains information for a client service. It is
@@ -38,6 +38,15 @@ type ClientCommonConf struct {
 	// ServerPort specifies the port to connect to the server on. By default,
 	// this value is 7000.
 	ServerPort int `ini:"server_port" json:"server_port"`
+	// The maximum amount of time a dial to server will wait for a connect to complete.
+	DialServerTimeout int64 `ini:"dial_server_timeout" json:"dial_server_timeout"`
+	// DialServerKeepAlive specifies the interval between keep-alive probes for an active network connection between frpc and frps.
+	// If negative, keep-alive probes are disabled.
+	DialServerKeepAlive int64 `ini:"dial_server_keepalive" json:"dial_server_keepalive"`
+	// ConnectServerLocalIP specifies the address of the client bind when it connect to server.
+	// By default, this value is empty.
+	// this value only use in TCP/Websocket protocol. Not support in KCP protocol.
+	ConnectServerLocalIP string `ini:"connect_server_local_ip" json:"connect_server_local_ip"`
 	// HTTPProxy specifies a proxy address to connect to the server through. If
 	// this value is "", the server will be connected to directly. By default,
 	// this value is read from the "http_proxy" environment variable.
@@ -86,6 +95,9 @@ type ClientCommonConf struct {
 	// the server must have TCP multiplexing enabled as well. By default, this
 	// value is true.
 	TCPMux bool `ini:"tcp_mux" json:"tcp_mux"`
+	// TCPMuxKeepaliveInterval specifies the keep alive interval for TCP stream multipler.
+	// If TCPMux is true, heartbeat of application layer is unnecessary because it can only rely on heartbeat in TCPMux.
+	TCPMuxKeepaliveInterval int64 `ini:"tcp_mux_keepalive_interval" json:"tcp_mux_keepalive_interval"`
 	// User specifies a prefix for proxy names to distinguish them from other
 	// clients. If this value is not "", proxy names will automatically be
 	// changed to "{user}.{proxy_name}". By default, this value is "".
@@ -101,7 +113,7 @@ type ClientCommonConf struct {
 	// all supplied proxies are enabled. By default, this value is an empty
 	// set.
 	Start []string `ini:"start" json:"start"`
-	//Start map[string]struct{} `json:"start"`
+	// Start map[string]struct{} `json:"start"`
 	// Protocol specifies the protocol to use when interacting with the server.
 	// Valid values are "tcp", "kcp" and "websocket". By default, this value
 	// is "tcp".
@@ -121,16 +133,19 @@ type ClientCommonConf struct {
 	// It only works when "tls_enable" is valid and tls configuration of server
 	// has been specified.
 	TLSTrustedCaFile string `ini:"tls_trusted_ca_file" json:"tls_trusted_ca_file"`
-	// TLSServerName specifices the custom server name of tls certificate. By
+	// TLSServerName specifies the custom server name of tls certificate. By
 	// default, server name if same to ServerAddr.
 	TLSServerName string `ini:"tls_server_name" json:"tls_server_name"`
+	// By default, frpc will connect frps with first custom byte if tls is enabled.
+	// If DisableCustomTLSFirstByte is true, frpc will not send that custom byte.
+	DisableCustomTLSFirstByte bool `ini:"disable_custom_tls_first_byte" json:"disable_custom_tls_first_byte"`
 	// HeartBeatInterval specifies at what interval heartbeats are sent to the
 	// server, in seconds. It is not recommended to change this value. By
-	// default, this value is 30.
+	// default, this value is 30. Set negative value to disable it.
 	HeartbeatInterval int64 `ini:"heartbeat_interval" json:"heartbeat_interval"`
 	// HeartBeatTimeout specifies the maximum allowed heartbeat response delay
 	// before the connection is terminated, in seconds. It is not recommended
-	// to change this value. By default, this value is 90.
+	// to change this value. By default, this value is 90. Set negative value to disable it.
 	HeartbeatTimeout int64 `ini:"heartbeat_timeout" json:"heartbeat_timeout"`
 	// Client meta info
 	Metas map[string]string `ini:"-" json:"metas"`
@@ -139,41 +154,48 @@ type ClientCommonConf struct {
 	UDPPacketSize int64 `ini:"udp_packet_size" json:"udp_packet_size"`
 	// Include other config files for proxies.
 	IncludeConfigFiles []string `ini:"includes" json:"includes"`
+	// Enable golang pprof handlers in admin listener.
+	// Admin port must be set first.
+	PprofEnable bool `ini:"pprof_enable" json:"pprof_enable"`
 }
 
 // GetDefaultClientConf returns a client configuration with default values.
 func GetDefaultClientConf() ClientCommonConf {
 	return ClientCommonConf{
-		ClientConfig:       auth.GetDefaultClientConf(),
-		ServerAddr:         "0.0.0.0",
-		ServerPort:         7000,
-		HTTPProxy:          os.Getenv("http_proxy"),
-		LogFile:            "console",
-		LogWay:             "console",
-		LogLevel:           "info",
-		LogMaxDays:         3,
-		DisableLogColor:    false,
-		AdminAddr:          "127.0.0.1",
-		AdminPort:          0,
-		AdminUser:          "",
-		AdminPwd:           "",
-		AssetsDir:          "",
-		PoolCount:          1,
-		TCPMux:             true,
-		User:               "",
-		DNSServer:          "",
-		LoginFailExit:      true,
-		Start:              make([]string, 0),
-		Protocol:           "tcp",
-		TLSEnable:          false,
-		TLSCertFile:        "",
-		TLSKeyFile:         "",
-		TLSTrustedCaFile:   "",
-		HeartbeatInterval:  30,
-		HeartbeatTimeout:   90,
-		Metas:              make(map[string]string),
-		UDPPacketSize:      1500,
-		IncludeConfigFiles: make([]string, 0),
+		ClientConfig:            auth.GetDefaultClientConf(),
+		ServerAddr:              "0.0.0.0",
+		ServerPort:              7000,
+		DialServerTimeout:       10,
+		DialServerKeepAlive:     7200,
+		HTTPProxy:               os.Getenv("http_proxy"),
+		LogFile:                 "console",
+		LogWay:                  "console",
+		LogLevel:                "info",
+		LogMaxDays:              3,
+		DisableLogColor:         false,
+		AdminAddr:               "127.0.0.1",
+		AdminPort:               0,
+		AdminUser:               "",
+		AdminPwd:                "",
+		AssetsDir:               "",
+		PoolCount:               1,
+		TCPMux:                  true,
+		TCPMuxKeepaliveInterval: 60,
+		User:                    "",
+		DNSServer:               "",
+		LoginFailExit:           true,
+		Start:                   make([]string, 0),
+		Protocol:                "tcp",
+		TLSEnable:               false,
+		TLSCertFile:             "",
+		TLSKeyFile:              "",
+		TLSTrustedCaFile:        "",
+		HeartbeatInterval:       30,
+		HeartbeatTimeout:        90,
+		Metas:                   make(map[string]string),
+		UDPPacketSize:           1500,
+		IncludeConfigFiles:      make([]string, 0),
+		PprofEnable:             false,
 	}
 }
 
@@ -186,15 +208,13 @@ func (cfg *ClientCommonConf) Complete() {
 }
 
 func (cfg *ClientCommonConf) Validate() error {
-	if cfg.HeartbeatInterval <= 0 {
-		return fmt.Errorf("invalid heartbeat_interval")
+	if cfg.HeartbeatTimeout > 0 && cfg.HeartbeatInterval > 0 {
+		if cfg.HeartbeatTimeout < cfg.HeartbeatInterval {
+			return fmt.Errorf("invalid heartbeat_timeout, heartbeat_timeout is less than heartbeat_interval")
+		}
 	}
 
-	if cfg.HeartbeatTimeout < cfg.HeartbeatInterval {
-		return fmt.Errorf("invalid heartbeat_timeout, heartbeat_timeout is less than heartbeat_interval")
-	}
-
-	if cfg.TLSEnable == false {
+	if !cfg.TLSEnable {
 		if cfg.TLSCertFile != "" {
 			fmt.Println("WARNING! tls_cert_file is invalid when tls_enable is false")
 		}
@@ -249,6 +269,8 @@ func UnmarshalClientConfFromIni(source interface{}) (ClientCommonConf, error) {
 	}
 
 	common.Metas = GetMapWithoutPrefix(s.KeysHash(), "meta_")
+	common.ClientConfig.OidcAdditionalEndpointParams = GetMapWithoutPrefix(s.KeysHash(), "oidc_additional_")
+
 	return common, nil
 }
 
@@ -259,7 +281,6 @@ func LoadAllProxyConfsFromIni(
 	source interface{},
 	start []string,
 ) (map[string]ProxyConf, map[string]VisitorConf, error) {
-
 	f, err := ini.LoadSources(ini.LoadOptions{
 		Insensitive:         false,
 		InsensitiveSections: false,
@@ -344,7 +365,6 @@ func LoadAllProxyConfsFromIni(
 }
 
 func renderRangeProxyTemplates(f *ini.File, section *ini.Section) error {
-
 	// Validation
 	localPortStr := section.Key("local_port").String()
 	remotePortStr := section.Key("remote_port").String()
@@ -382,8 +402,12 @@ func renderRangeProxyTemplates(f *ini.File, section *ini.Section) error {
 		}
 
 		copySection(section, tmpsection)
-		tmpsection.NewKey("local_port", fmt.Sprintf("%d", localPorts[i]))
-		tmpsection.NewKey("remote_port", fmt.Sprintf("%d", remotePorts[i]))
+		if _, err := tmpsection.NewKey("local_port", fmt.Sprintf("%d", localPorts[i])); err != nil {
+			return fmt.Errorf("local_port new key in section error: %v", err)
+		}
+		if _, err := tmpsection.NewKey("remote_port", fmt.Sprintf("%d", remotePorts[i])); err != nil {
+			return fmt.Errorf("remote_port new key in section error: %v", err)
+		}
 	}
 
 	return nil
@@ -391,6 +415,6 @@ func renderRangeProxyTemplates(f *ini.File, section *ini.Section) error {
 
 func copySection(source, target *ini.Section) {
 	for key, value := range source.KeysHash() {
-		target.NewKey(key, value)
+		_, _ = target.NewKey(key, value)
 	}
 }

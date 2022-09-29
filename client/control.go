@@ -21,8 +21,12 @@ import (
 	"net"
 	"runtime/debug"
 	"strconv"
-	"sync"
 	"time"
+
+	"github.com/fatedier/golib/control/shutdown"
+	"github.com/fatedier/golib/crypto"
+	libdial "github.com/fatedier/golib/net/dial"
+	fmux "github.com/hashicorp/yamux"
 
 	"github.com/fatedier/frp/client/proxy"
 	"github.com/fatedier/frp/pkg/auth"
@@ -31,10 +35,6 @@ import (
 	"github.com/fatedier/frp/pkg/transport"
 	frpNet "github.com/fatedier/frp/pkg/util/net"
 	"github.com/fatedier/frp/pkg/util/xlog"
-
-	"github.com/fatedier/golib/control/shutdown"
-	"github.com/fatedier/golib/crypto"
-	fmux "github.com/hashicorp/yamux"
 )
 
 type Control struct {
@@ -78,8 +78,6 @@ type Control struct {
 	// The UDP port that the server is listening on
 	serverUDPPort int
 
-	mu sync.RWMutex
-
 	xl *xlog.Logger
 
 	// service context
@@ -94,8 +92,8 @@ func NewControl(ctx context.Context, runID string, conn net.Conn, session *fmux.
 	pxyCfgs map[string]config.ProxyConf,
 	visitorCfgs map[string]config.VisitorConf,
 	serverUDPPort int,
-	authSetter auth.Setter) *Control {
-
+	authSetter auth.Setter,
+) *Control {
 	// new xlog instance
 	ctl := &Control{
 		runID:              runID,
@@ -130,7 +128,6 @@ func (ctl *Control) Run() {
 
 	// start all visitors
 	go ctl.vm.Run()
-	return
 }
 
 func (ctl *Control) HandleReqWorkConn(inMsg *msg.ReqWorkConn) {
@@ -182,9 +179,16 @@ func (ctl *Control) HandleNewProxyResp(inMsg *msg.NewProxyResp) {
 }
 
 func (ctl *Control) Close() error {
+	return ctl.GracefulClose(0)
+}
+
+func (ctl *Control) GracefulClose(d time.Duration) error {
 	ctl.pm.Close()
-	ctl.conn.Close()
 	ctl.vm.Close()
+
+	time.Sleep(d)
+
+	ctl.conn.Close()
 	if ctl.session != nil {
 		ctl.session.Close()
 	}
@@ -227,12 +231,38 @@ func (ctl *Control) connectServer() (conn net.Conn, err error) {
 			}
 		}
 
-		address := net.JoinHostPort(ctl.clientCfg.ServerAddr, strconv.Itoa(ctl.clientCfg.ServerPort))
-		conn, err = frpNet.ConnectServerByProxyWithTLS(ctl.clientCfg.HTTPProxy, ctl.clientCfg.Protocol, address, tlsConfig)
-
+		proxyType, addr, auth, err := libdial.ParseProxyURL(ctl.clientCfg.HTTPProxy)
+		if err != nil {
+			xl.Error("fail to parse proxy url")
+			return nil, err
+		}
+		dialOptions := []libdial.DialOption{}
+		protocol := ctl.clientCfg.Protocol
+		if protocol == "websocket" {
+			protocol = "tcp"
+			dialOptions = append(dialOptions, libdial.WithAfterHook(libdial.AfterHook{Hook: frpNet.DialHookWebsocket()}))
+		}
+		if ctl.clientCfg.ConnectServerLocalIP != "" {
+			dialOptions = append(dialOptions, libdial.WithLocalAddr(ctl.clientCfg.ConnectServerLocalIP))
+		}
+		dialOptions = append(dialOptions,
+			libdial.WithProtocol(protocol),
+			libdial.WithTimeout(time.Duration(ctl.clientCfg.DialServerTimeout)*time.Second),
+			libdial.WithKeepAlive(time.Duration(ctl.clientCfg.DialServerKeepAlive)*time.Second),
+			libdial.WithProxy(proxyType, addr),
+			libdial.WithProxyAuth(auth),
+			libdial.WithTLSConfig(tlsConfig),
+			libdial.WithAfterHook(libdial.AfterHook{
+				Hook: frpNet.DialHookCustomTLSHeadByte(tlsConfig != nil, ctl.clientCfg.DisableCustomTLSFirstByte),
+			}),
+		)
+		conn, err = libdial.Dial(
+			net.JoinHostPort(ctl.clientCfg.ServerAddr, strconv.Itoa(ctl.clientCfg.ServerPort)),
+			dialOptions...,
+		)
 		if err != nil {
 			xl.Warn("start new connection to server error: %v", err)
-			return
+			return nil, err
 		}
 	}
 	return
@@ -301,16 +331,27 @@ func (ctl *Control) msgHandler() {
 	}()
 	defer ctl.msgHandlerShutdown.Done()
 
-	hbSend := time.NewTicker(time.Duration(ctl.clientCfg.HeartbeatInterval) * time.Second)
-	defer hbSend.Stop()
-	hbCheck := time.NewTicker(time.Second)
-	defer hbCheck.Stop()
+	var hbSendCh <-chan time.Time
+	// TODO(fatedier): disable heartbeat if TCPMux is enabled.
+	// Just keep it here to keep compatible with old version frps.
+	if ctl.clientCfg.HeartbeatInterval > 0 {
+		hbSend := time.NewTicker(time.Duration(ctl.clientCfg.HeartbeatInterval) * time.Second)
+		defer hbSend.Stop()
+		hbSendCh = hbSend.C
+	}
+
+	var hbCheckCh <-chan time.Time
+	// Check heartbeat timeout only if TCPMux is not enabled and users don't disable heartbeat feature.
+	if ctl.clientCfg.HeartbeatInterval > 0 && ctl.clientCfg.HeartbeatTimeout > 0 && !ctl.clientCfg.TCPMux {
+		hbCheck := time.NewTicker(time.Second)
+		defer hbCheck.Stop()
+		hbCheckCh = hbCheck.C
+	}
 
 	ctl.lastPong = time.Now()
-
 	for {
 		select {
-		case <-hbSend.C:
+		case <-hbSendCh:
 			// send heartbeat to server
 			xl.Debug("send heartbeat to server")
 			pingMsg := &msg.Ping{}
@@ -319,7 +360,7 @@ func (ctl *Control) msgHandler() {
 				return
 			}
 			ctl.sendCh <- pingMsg
-		case <-hbCheck.C:
+		case <-hbCheckCh:
 			if time.Since(ctl.lastPong) > time.Duration(ctl.clientCfg.HeartbeatTimeout)*time.Second {
 				xl.Warn("heartbeat timeout")
 				// let reader() stop
@@ -355,24 +396,21 @@ func (ctl *Control) worker() {
 	go ctl.reader()
 	go ctl.writer()
 
-	select {
-	case <-ctl.closedCh:
-		// close related channels and wait until other goroutines done
-		close(ctl.readCh)
-		ctl.readerShutdown.WaitDone()
-		ctl.msgHandlerShutdown.WaitDone()
+	<-ctl.closedCh
+	// close related channels and wait until other goroutines done
+	close(ctl.readCh)
+	ctl.readerShutdown.WaitDone()
+	ctl.msgHandlerShutdown.WaitDone()
 
-		close(ctl.sendCh)
-		ctl.writerShutdown.WaitDone()
+	close(ctl.sendCh)
+	ctl.writerShutdown.WaitDone()
 
-		ctl.pm.Close()
-		ctl.vm.Close()
+	ctl.pm.Close()
+	ctl.vm.Close()
 
-		close(ctl.closedDoneCh)
-		if ctl.session != nil {
-			ctl.session.Close()
-		}
-		return
+	close(ctl.closedDoneCh)
+	if ctl.session != nil {
+		ctl.session.Close()
 	}
 }
 

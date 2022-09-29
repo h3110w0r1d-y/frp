@@ -18,16 +18,16 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"os"
 	"strings"
 
-	"github.com/fatedier/frp/client"
-	"github.com/fatedier/frp/pkg/config"
-
 	"github.com/rodaine/table"
 	"github.com/spf13/cobra"
+
+	"github.com/fatedier/frp/client"
+	"github.com/fatedier/frp/pkg/config"
 )
 
 func init() {
@@ -77,7 +77,7 @@ func status(clientCfg config.ClientCommonConf) error {
 		return fmt.Errorf("admin api status code [%d]", resp.StatusCode)
 	}
 
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return err
 	}

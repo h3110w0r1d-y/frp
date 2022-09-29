@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strconv"
 	"sync"
 	"time"
 
@@ -54,7 +55,7 @@ func NewFakeUDPConn(l *UDPListener, laddr, raddr net.Addr) *FakeUDPConn {
 		for {
 			time.Sleep(5 * time.Second)
 			fc.mu.RLock()
-			if time.Now().Sub(fc.lastActive) > 10*time.Second {
+			if time.Since(fc.lastActive) > 10*time.Second {
 				fc.mu.RUnlock()
 				fc.Close()
 				break
@@ -67,8 +68,7 @@ func NewFakeUDPConn(l *UDPListener, laddr, raddr net.Addr) *FakeUDPConn {
 
 func (c *FakeUDPConn) putPacket(content []byte) {
 	defer func() {
-		if err := recover(); err != nil {
-		}
+		_ = recover()
 	}()
 
 	select {
@@ -108,7 +108,7 @@ func (c *FakeUDPConn) Write(b []byte) (n int, err error) {
 		LocalAddr:  c.localAddr,
 		RemoteAddr: c.remoteAddr,
 	}
-	c.l.writeUDPPacket(packet)
+	_ = c.l.writeUDPPacket(packet)
 
 	c.mu.Lock()
 	c.lastActive = time.Now()
@@ -163,7 +163,7 @@ type UDPListener struct {
 }
 
 func ListenUDP(bindAddr string, bindPort int) (l *UDPListener, err error) {
-	udpAddr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", bindAddr, bindPort))
+	udpAddr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(bindAddr, strconv.Itoa(bindPort)))
 	if err != nil {
 		return l, err
 	}
@@ -207,7 +207,7 @@ func ListenUDP(bindAddr string, bindPort int) (l *UDPListener, err error) {
 			}
 
 			if addr, ok := packet.RemoteAddr.(*net.UDPAddr); ok {
-				readConn.WriteToUDP(packet.Buf, addr)
+				_, _ = readConn.WriteToUDP(packet.Buf, addr)
 			}
 		}
 	}()

@@ -3,19 +3,20 @@ package features
 import (
 	"fmt"
 	"strings"
+	"time"
+
+	"github.com/onsi/ginkgo"
 
 	"github.com/fatedier/frp/pkg/util/log"
 	"github.com/fatedier/frp/test/e2e/framework"
 	"github.com/fatedier/frp/test/e2e/framework/consts"
 	"github.com/fatedier/frp/test/e2e/pkg/request"
-
-	. "github.com/onsi/ginkgo"
 )
 
-var _ = Describe("[Feature: Monitor]", func() {
+var _ = ginkgo.Describe("[Feature: Monitor]", func() {
 	f := framework.NewDefaultFramework()
 
-	It("Prometheus metrics", func() {
+	ginkgo.It("Prometheus metrics", func() {
 		dashboardPort := f.AllocPort()
 		serverConf := consts.DefaultServerConfig + fmt.Sprintf(`
 		enable_prometheus = true
@@ -35,6 +36,7 @@ var _ = Describe("[Feature: Monitor]", func() {
 		f.RunProcesses([]string{serverConf}, []string{clientConf})
 
 		framework.NewRequestExpect(f).Port(remotePort).Ensure()
+		time.Sleep(500 * time.Millisecond)
 
 		framework.NewRequestExpect(f).RequestModify(func(r *request.Request) {
 			r.HTTP().Port(dashboardPort).HTTPPath("/metrics")

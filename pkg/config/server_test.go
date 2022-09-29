@@ -17,10 +17,10 @@ package config
 import (
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+
 	"github.com/fatedier/frp/pkg/auth"
 	plugin "github.com/fatedier/frp/pkg/plugin/server"
-
-	"github.com/stretchr/testify/assert"
 )
 
 func Test_LoadServerCommonConf(t *testing.T) {
@@ -127,20 +127,22 @@ func Test_LoadServerCommonConf(t *testing.T) {
 				HeartbeatTimeout:       99,
 				UserConnTimeout:        9,
 				AllowPorts: map[int]struct{}{
-					10: struct{}{},
-					11: struct{}{},
-					12: struct{}{},
-					99: struct{}{},
+					10: {},
+					11: {},
+					12: {},
+					99: {},
 				},
-				MaxPoolCount:      59,
-				MaxPortsPerClient: 9,
-				TLSOnly:           true,
-				TLSCertFile:       "server.crt",
-				TLSKeyFile:        "server.key",
-				TLSTrustedCaFile:  "ca.crt",
-				SubDomainHost:     "frps.com",
-				TCPMux:            true,
-				UDPPacketSize:     1509,
+				MaxPoolCount:            59,
+				MaxPortsPerClient:       9,
+				TLSOnly:                 true,
+				TLSCertFile:             "server.crt",
+				TLSKeyFile:              "server.key",
+				TLSTrustedCaFile:        "ca.crt",
+				SubDomainHost:           "frps.com",
+				TCPMux:                  true,
+				TCPMuxKeepaliveInterval: 60,
+				TCPKeepAlive:            7200,
+				UDPPacketSize:           1509,
 
 				HTTPPlugins: map[string]plugin.HTTPPluginOptions{
 					"user-manager": {
@@ -175,27 +177,29 @@ func Test_LoadServerCommonConf(t *testing.T) {
 						AuthenticateNewWorkConns: false,
 					},
 				},
-				BindAddr:               "0.0.0.9",
-				BindPort:               7009,
-				BindUDPPort:            7008,
-				ProxyBindAddr:          "0.0.0.9",
-				VhostHTTPTimeout:       60,
-				DashboardAddr:          "0.0.0.0",
-				DashboardUser:          "",
-				DashboardPwd:           "",
-				EnablePrometheus:       false,
-				LogFile:                "console",
-				LogWay:                 "console",
-				LogLevel:               "info",
-				LogMaxDays:             3,
-				DetailedErrorsToClient: true,
-				TCPMux:                 true,
-				AllowPorts:             make(map[int]struct{}),
-				MaxPoolCount:           5,
-				HeartbeatTimeout:       90,
-				UserConnTimeout:        10,
-				HTTPPlugins:            make(map[string]plugin.HTTPPluginOptions),
-				UDPPacketSize:          1500,
+				BindAddr:                "0.0.0.9",
+				BindPort:                7009,
+				BindUDPPort:             7008,
+				ProxyBindAddr:           "0.0.0.9",
+				VhostHTTPTimeout:        60,
+				DashboardAddr:           "0.0.0.0",
+				DashboardUser:           "",
+				DashboardPwd:            "",
+				EnablePrometheus:        false,
+				LogFile:                 "console",
+				LogWay:                  "console",
+				LogLevel:                "info",
+				LogMaxDays:              3,
+				DetailedErrorsToClient:  true,
+				TCPMux:                  true,
+				TCPMuxKeepaliveInterval: 60,
+				TCPKeepAlive:            7200,
+				AllowPorts:              make(map[int]struct{}),
+				MaxPoolCount:            5,
+				HeartbeatTimeout:        90,
+				UserConnTimeout:         10,
+				HTTPPlugins:             make(map[string]plugin.HTTPPluginOptions),
+				UDPPacketSize:           1500,
 			},
 		},
 	}

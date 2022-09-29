@@ -19,16 +19,17 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strconv"
 	"time"
+
+	"github.com/fatedier/golib/errors"
+	frpIo "github.com/fatedier/golib/io"
 
 	"github.com/fatedier/frp/pkg/config"
 	"github.com/fatedier/frp/pkg/msg"
 	"github.com/fatedier/frp/pkg/proto/udp"
 	frpNet "github.com/fatedier/frp/pkg/util/net"
 	"github.com/fatedier/frp/server/metrics"
-
-	"github.com/fatedier/golib/errors"
-	frpIo "github.com/fatedier/golib/io"
 )
 
 type UDPProxy struct {
@@ -70,7 +71,7 @@ func (pxy *UDPProxy) Run() (remoteAddr string, err error) {
 
 	remoteAddr = fmt.Sprintf(":%d", pxy.realPort)
 	pxy.cfg.RemotePort = pxy.realPort
-	addr, errRet := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", pxy.serverCfg.ProxyBindAddr, pxy.realPort))
+	addr, errRet := net.ResolveUDPAddr("udp", net.JoinHostPort(pxy.serverCfg.ProxyBindAddr, strconv.Itoa(pxy.realPort)))
 	if errRet != nil {
 		err = errRet
 		return
@@ -97,18 +98,20 @@ func (pxy *UDPProxy) Run() (remoteAddr string, err error) {
 			)
 			xl.Trace("loop waiting message from udp workConn")
 			// client will send heartbeat in workConn for keeping alive
-			conn.SetReadDeadline(time.Now().Add(time.Duration(60) * time.Second))
+			_ = conn.SetReadDeadline(time.Now().Add(time.Duration(60) * time.Second))
 			if rawMsg, errRet = msg.ReadMsg(conn); errRet != nil {
 				xl.Warn("read from workConn for udp error: %v", errRet)
-				conn.Close()
+				_ = conn.Close()
 				// notify proxy to start a new work connection
 				// ignore error here, it means the proxy is closed
-				errors.PanicToError(func() {
+				_ = errors.PanicToError(func() {
 					pxy.checkCloseCh <- 1
 				})
 				return
 			}
-			conn.SetReadDeadline(time.Time{})
+			if err := conn.SetReadDeadline(time.Time{}); err != nil {
+				xl.Warn("set read deadline error: %v", err)
+			}
 			switch m := rawMsg.(type) {
 			case *msg.Ping:
 				xl.Trace("udp work conn get ping message")

@@ -22,20 +22,27 @@ import (
 	"net/http"
 	"time"
 
+	gnet "github.com/fatedier/golib/net"
+
 	"github.com/fatedier/frp/pkg/util/util"
 	"github.com/fatedier/frp/pkg/util/vhost"
 )
 
 type HTTPConnectTCPMuxer struct {
 	*vhost.Muxer
+
+	passthrough  bool
+	authRequired bool // Not supported until we really need this.
 }
 
-func NewHTTPConnectTCPMuxer(listener net.Listener, timeout time.Duration) (*HTTPConnectTCPMuxer, error) {
-	mux, err := vhost.NewMuxer(listener, getHostFromHTTPConnect, nil, sendHTTPOk, nil, timeout)
-	return &HTTPConnectTCPMuxer{mux}, err
+func NewHTTPConnectTCPMuxer(listener net.Listener, passthrough bool, timeout time.Duration) (*HTTPConnectTCPMuxer, error) {
+	ret := &HTTPConnectTCPMuxer{passthrough: passthrough, authRequired: false}
+	mux, err := vhost.NewMuxer(listener, ret.getHostFromHTTPConnect, nil, ret.sendConnectResponse, nil, timeout)
+	ret.Muxer = mux
+	return ret, err
 }
 
-func readHTTPConnectRequest(rd io.Reader) (host string, err error) {
+func (muxer *HTTPConnectTCPMuxer) readHTTPConnectRequest(rd io.Reader) (host string, httpUser string, err error) {
 	bufioReader := bufio.NewReader(rd)
 
 	req, err := http.ReadRequest(bufioReader)
@@ -48,21 +55,49 @@ func readHTTPConnectRequest(rd io.Reader) (host string, err error) {
 		return
 	}
 
-	host = util.GetHostFromAddr(req.Host)
+	host, _ = util.CanonicalHost(req.Host)
+	proxyAuth := req.Header.Get("Proxy-Authorization")
+	if proxyAuth != "" {
+		httpUser, _, _ = util.ParseBasicAuth(proxyAuth)
+	}
 	return
 }
 
-func sendHTTPOk(c net.Conn) error {
-	return util.OkResponse().Write(c)
+func (muxer *HTTPConnectTCPMuxer) sendConnectResponse(c net.Conn, reqInfo map[string]string) error {
+	if muxer.passthrough {
+		return nil
+	}
+	res := util.OkResponse()
+	if res.Body != nil {
+		defer res.Body.Close()
+	}
+	return res.Write(c)
 }
 
-func getHostFromHTTPConnect(c net.Conn) (_ net.Conn, _ map[string]string, err error) {
+func (muxer *HTTPConnectTCPMuxer) getHostFromHTTPConnect(c net.Conn) (net.Conn, map[string]string, error) {
 	reqInfoMap := make(map[string]string, 0)
-	host, err := readHTTPConnectRequest(c)
+	sc, rd := gnet.NewSharedConn(c)
+
+	host, httpUser, err := muxer.readHTTPConnectRequest(rd)
 	if err != nil {
 		return nil, reqInfoMap, err
 	}
+
 	reqInfoMap["Host"] = host
 	reqInfoMap["Scheme"] = "tcp"
-	return c, reqInfoMap, nil
+	reqInfoMap["HTTPUser"] = httpUser
+
+	outConn := c
+	if muxer.passthrough {
+		outConn = sc
+		if muxer.authRequired && httpUser == "" {
+			resp := util.ProxyUnauthorizedResponse()
+			if resp.Body != nil {
+				defer resp.Body.Close()
+			}
+			_ = resp.Write(c)
+			outConn = c
+		}
+	}
+	return outConn, reqInfoMap, nil
 }

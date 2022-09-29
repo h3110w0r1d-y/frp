@@ -6,17 +6,18 @@ import (
 	"strings"
 	"time"
 
+	"github.com/onsi/ginkgo"
+
 	"github.com/fatedier/frp/test/e2e/framework"
 	"github.com/fatedier/frp/test/e2e/framework/consts"
+	"github.com/fatedier/frp/test/e2e/pkg/request"
 	clientsdk "github.com/fatedier/frp/test/e2e/pkg/sdk/client"
-
-	. "github.com/onsi/ginkgo"
 )
 
-var _ = Describe("[Feature: ClientManage]", func() {
+var _ = ginkgo.Describe("[Feature: ClientManage]", func() {
 	f := framework.NewDefaultFramework()
 
-	It("Update && Reload API", func() {
+	ginkgo.It("Update && Reload API", func() {
 		serverConf := consts.DefaultServerConfig
 
 		adminPort := f.AllocPort()
@@ -61,7 +62,9 @@ var _ = Describe("[Feature: ClientManage]", func() {
 		// change p2 port and remove p3 proxy
 		newClientConf := strings.ReplaceAll(conf, strconv.Itoa(p2Port), strconv.Itoa(newP2Port))
 		p3Index := strings.Index(newClientConf, "[p3]")
-		newClientConf = newClientConf[:p3Index]
+		if p3Index >= 0 {
+			newClientConf = newClientConf[:p3Index]
+		}
 
 		err = client.UpdateConfig(newClientConf)
 		framework.ExpectNoError(err)
@@ -74,5 +77,28 @@ var _ = Describe("[Feature: ClientManage]", func() {
 		framework.NewRequestExpect(f).Port(p2Port).Explain("original p2 port").ExpectError(true).Ensure()
 		framework.NewRequestExpect(f).Port(newP2Port).Explain("new p2 port").Ensure()
 		framework.NewRequestExpect(f).Port(p3Port).Explain("p3 port").ExpectError(true).Ensure()
+	})
+
+	ginkgo.It("healthz", func() {
+		serverConf := consts.DefaultServerConfig
+
+		dashboardPort := f.AllocPort()
+		clientConf := consts.DefaultClientConfig + fmt.Sprintf(`
+		admin_addr = 0.0.0.0
+		admin_port = %d
+		admin_user = admin
+		admin_pwd = admin
+		`, dashboardPort)
+
+		f.RunProcesses([]string{serverConf}, []string{clientConf})
+
+		framework.NewRequestExpect(f).RequestModify(func(r *request.Request) {
+			r.HTTP().HTTPPath("/healthz")
+		}).Port(dashboardPort).ExpectResp([]byte("")).Ensure()
+
+		framework.NewRequestExpect(f).RequestModify(func(r *request.Request) {
+			r.HTTP().HTTPPath("/")
+		}).Port(dashboardPort).
+			Ensure(framework.ExpectResponseCode(401))
 	})
 })

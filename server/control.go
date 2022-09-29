@@ -23,6 +23,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/fatedier/golib/control/shutdown"
+	"github.com/fatedier/golib/crypto"
+	"github.com/fatedier/golib/errors"
+
 	"github.com/fatedier/frp/pkg/auth"
 	"github.com/fatedier/frp/pkg/config"
 	"github.com/fatedier/frp/pkg/consts"
@@ -35,10 +39,6 @@ import (
 	"github.com/fatedier/frp/server/controller"
 	"github.com/fatedier/frp/server/metrics"
 	"github.com/fatedier/frp/server/proxy"
-
-	"github.com/fatedier/golib/control/shutdown"
-	"github.com/fatedier/golib/crypto"
-	"github.com/fatedier/golib/errors"
 )
 
 type ControlManager struct {
@@ -154,7 +154,6 @@ func NewControl(
 	loginMsg *msg.Login,
 	serverCfg config.ServerCommonConf,
 ) *Control {
-
 	poolCount := loginMsg.PoolCount
 	if poolCount > int(serverCfg.MaxPoolCount) {
 		poolCount = int(serverCfg.MaxPoolCount)
@@ -193,7 +192,7 @@ func (ctl *Control) Start() {
 		ServerUDPPort: ctl.serverCfg.BindUDPPort,
 		Error:         "",
 	}
-	msg.WriteMsg(ctl.conn, loginRespMsg)
+	_ = msg.WriteMsg(ctl.conn, loginRespMsg)
 
 	go ctl.writer()
 	for i := 0; i < ctl.poolCount; i++ {
@@ -258,7 +257,7 @@ func (ctl *Control) GetWorkConn() (workConn net.Conn, err error) {
 		case workConn, ok = <-ctl.workConnCh:
 			if !ok {
 				err = frpErr.ErrCtlClosed
-				xl.Warn("no work connections avaiable, %v", err)
+				xl.Warn("no work connections available, %v", err)
 				return
 			}
 
@@ -270,7 +269,7 @@ func (ctl *Control) GetWorkConn() (workConn net.Conn, err error) {
 	}
 
 	// When we get a work connection from pool, replace it with a new one.
-	errors.PanicToError(func() {
+	_ = errors.PanicToError(func() {
 		ctl.sendCh <- &msg.ReqWorkConn{}
 	})
 	return
@@ -376,6 +375,20 @@ func (ctl *Control) stoper() {
 		pxy.Close()
 		ctl.pxyManager.Del(pxy.GetName())
 		metrics.Server.CloseProxy(pxy.GetName(), pxy.GetConf().GetBaseInfo().ProxyType)
+
+		notifyContent := &plugin.CloseProxyContent{
+			User: plugin.UserInfo{
+				User:  ctl.loginMsg.User,
+				Metas: ctl.loginMsg.Metas,
+				RunID: ctl.loginMsg.RunID,
+			},
+			CloseProxy: msg.CloseProxy{
+				ProxyName: pxy.GetName(),
+			},
+		}
+		go func() {
+			_ = ctl.pluginManager.CloseProxy(notifyContent)
+		}()
 	}
 
 	ctl.allShutdown.Done()
@@ -400,12 +413,19 @@ func (ctl *Control) manager() {
 	defer ctl.allShutdown.Start()
 	defer ctl.managerShutdown.Done()
 
-	heartbeat := time.NewTicker(time.Second)
-	defer heartbeat.Stop()
+	var heartbeatCh <-chan time.Time
+	if ctl.serverCfg.TCPMux || ctl.serverCfg.HeartbeatTimeout <= 0 {
+		// Don't need application heartbeat here.
+		// yamux will do same thing.
+	} else {
+		heartbeat := time.NewTicker(time.Second)
+		defer heartbeat.Stop()
+		heartbeatCh = heartbeat.C
+	}
 
 	for {
 		select {
-		case <-heartbeat.C:
+		case <-heartbeatCh:
 			if time.Since(ctl.lastPing) > time.Duration(ctl.serverCfg.HeartbeatTimeout)*time.Second {
 				xl.Warn("heartbeat timeout")
 				return
@@ -437,16 +457,16 @@ func (ctl *Control) manager() {
 					ProxyName: m.ProxyName,
 				}
 				if err != nil {
-					xl.Warn("new proxy [%s] error: %v", m.ProxyName, err)
+					xl.Warn("new proxy [%s] type [%s] error: %v", m.ProxyName, m.ProxyType, err)
 					resp.Error = util.GenerateResponseErrorString(fmt.Sprintf("new proxy [%s] error", m.ProxyName), err, ctl.serverCfg.DetailedErrorsToClient)
 				} else {
 					resp.RemoteAddr = remoteAddr
-					xl.Info("new proxy [%s] success", m.ProxyName)
+					xl.Info("new proxy [%s] type [%s] success", m.ProxyName, m.ProxyType)
 					metrics.Server.NewProxy(m.ProxyName, m.ProxyType)
 				}
 				ctl.sendCh <- resp
 			case *msg.CloseProxy:
-				ctl.CloseProxy(m)
+				_ = ctl.CloseProxy(m)
 				xl.Info("close proxy [%s] success", m.ProxyName)
 			case *msg.Ping:
 				content := &plugin.PingContent{
@@ -507,13 +527,13 @@ func (ctl *Control) RegisterProxy(pxyMsg *msg.NewProxy) (remoteAddr string, err 
 			err = fmt.Errorf("exceed the max_ports_per_client")
 			return
 		}
-		ctl.portsUsedNum = ctl.portsUsedNum + pxy.GetUsedPortsNum()
+		ctl.portsUsedNum += pxy.GetUsedPortsNum()
 		ctl.mu.Unlock()
 
 		defer func() {
 			if err != nil {
 				ctl.mu.Lock()
-				ctl.portsUsedNum = ctl.portsUsedNum - pxy.GetUsedPortsNum()
+				ctl.portsUsedNum -= pxy.GetUsedPortsNum()
 				ctl.mu.Unlock()
 			}
 		}()
@@ -549,7 +569,7 @@ func (ctl *Control) CloseProxy(closeMsg *msg.CloseProxy) (err error) {
 	}
 
 	if ctl.serverCfg.MaxPortsPerClient > 0 {
-		ctl.portsUsedNum = ctl.portsUsedNum - pxy.GetUsedPortsNum()
+		ctl.portsUsedNum -= pxy.GetUsedPortsNum()
 	}
 	pxy.Close()
 	ctl.pxyManager.Del(pxy.GetName())
@@ -557,5 +577,20 @@ func (ctl *Control) CloseProxy(closeMsg *msg.CloseProxy) (err error) {
 	ctl.mu.Unlock()
 
 	metrics.Server.CloseProxy(pxy.GetName(), pxy.GetConf().GetBaseInfo().ProxyType)
+
+	notifyContent := &plugin.CloseProxyContent{
+		User: plugin.UserInfo{
+			User:  ctl.loginMsg.User,
+			Metas: ctl.loginMsg.Metas,
+			RunID: ctl.loginMsg.RunID,
+		},
+		CloseProxy: msg.CloseProxy{
+			ProxyName: pxy.GetName(),
+		},
+	}
+	go func() {
+		_ = ctl.pluginManager.CloseProxy(notifyContent)
+	}()
+
 	return
 }

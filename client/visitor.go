@@ -19,10 +19,15 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net"
+	"strconv"
 	"sync"
 	"time"
+
+	"github.com/fatedier/golib/errors"
+	frpIo "github.com/fatedier/golib/io"
+	"github.com/fatedier/golib/pool"
+	fmux "github.com/hashicorp/yamux"
 
 	"github.com/fatedier/frp/pkg/config"
 	"github.com/fatedier/frp/pkg/msg"
@@ -30,11 +35,6 @@ import (
 	frpNet "github.com/fatedier/frp/pkg/util/net"
 	"github.com/fatedier/frp/pkg/util/util"
 	"github.com/fatedier/frp/pkg/util/xlog"
-
-	"github.com/fatedier/golib/errors"
-	frpIo "github.com/fatedier/golib/io"
-	"github.com/fatedier/golib/pool"
-	fmux "github.com/hashicorp/yamux"
 )
 
 // Visitor is used for forward traffics from local port tot remote service.
@@ -71,9 +71,8 @@ func NewVisitor(ctx context.Context, ctl *Control, cfg config.VisitorConf) (visi
 }
 
 type BaseVisitor struct {
-	ctl    *Control
-	l      net.Listener
-	closed bool
+	ctl *Control
+	l   net.Listener
 
 	mu  sync.RWMutex
 	ctx context.Context
@@ -86,7 +85,7 @@ type STCPVisitor struct {
 }
 
 func (sv *STCPVisitor) Run() (err error) {
-	sv.l, err = net.Listen("tcp", fmt.Sprintf("%s:%d", sv.cfg.BindAddr, sv.cfg.BindPort))
+	sv.l, err = net.Listen("tcp", net.JoinHostPort(sv.cfg.BindAddr, strconv.Itoa(sv.cfg.BindPort)))
 	if err != nil {
 		return
 	}
@@ -138,13 +137,13 @@ func (sv *STCPVisitor) handleConn(userConn net.Conn) {
 	}
 
 	var newVisitorConnRespMsg msg.NewVisitorConnResp
-	visitorConn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	_ = visitorConn.SetReadDeadline(time.Now().Add(10 * time.Second))
 	err = msg.ReadMsgInto(visitorConn, &newVisitorConnRespMsg)
 	if err != nil {
 		xl.Warn("get newVisitorConnRespMsg error: %v", err)
 		return
 	}
-	visitorConn.SetReadDeadline(time.Time{})
+	_ = visitorConn.SetReadDeadline(time.Time{})
 
 	if newVisitorConnRespMsg.Error != "" {
 		xl.Warn("start new visitor connection error: %s", newVisitorConnRespMsg.Error)
@@ -175,7 +174,7 @@ type XTCPVisitor struct {
 }
 
 func (sv *XTCPVisitor) Run() (err error) {
-	sv.l, err = net.Listen("tcp", fmt.Sprintf("%s:%d", sv.cfg.BindAddr, sv.cfg.BindPort))
+	sv.l, err = net.Listen("tcp", net.JoinHostPort(sv.cfg.BindAddr, strconv.Itoa(sv.cfg.BindPort)))
 	if err != nil {
 		return
 	}
@@ -212,7 +211,7 @@ func (sv *XTCPVisitor) handleConn(userConn net.Conn) {
 	}
 
 	raddr, err := net.ResolveUDPAddr("udp",
-		fmt.Sprintf("%s:%d", sv.ctl.clientCfg.ServerAddr, sv.ctl.serverUDPPort))
+		net.JoinHostPort(sv.ctl.clientCfg.ServerAddr, strconv.Itoa(sv.ctl.serverUDPPort)))
 	if err != nil {
 		xl.Error("resolve server UDP addr error")
 		return
@@ -239,7 +238,7 @@ func (sv *XTCPVisitor) handleConn(userConn net.Conn) {
 
 	// Wait for client address at most 10 seconds.
 	var natHoleRespMsg msg.NatHoleResp
-	visitorConn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	_ = visitorConn.SetReadDeadline(time.Now().Add(10 * time.Second))
 	buf := pool.GetBuf(1024)
 	n, err := visitorConn.Read(buf)
 	if err != nil {
@@ -252,7 +251,7 @@ func (sv *XTCPVisitor) handleConn(userConn net.Conn) {
 		xl.Warn("get natHoleRespMsg error: %v", err)
 		return
 	}
-	visitorConn.SetReadDeadline(time.Time{})
+	_ = visitorConn.SetReadDeadline(time.Time{})
 	pool.PutBuf(buf)
 
 	if natHoleRespMsg.Error != "" {
@@ -279,17 +278,20 @@ func (sv *XTCPVisitor) handleConn(userConn net.Conn) {
 	}
 	defer lConn.Close()
 
-	lConn.Write([]byte(natHoleRespMsg.Sid))
+	if _, err := lConn.Write([]byte(natHoleRespMsg.Sid)); err != nil {
+		xl.Error("write sid error: %v", err)
+		return
+	}
 
 	// read ack sid from client
 	sidBuf := pool.GetBuf(1024)
-	lConn.SetReadDeadline(time.Now().Add(8 * time.Second))
+	_ = lConn.SetReadDeadline(time.Now().Add(8 * time.Second))
 	n, err = lConn.Read(sidBuf)
 	if err != nil {
 		xl.Warn("get sid from client error: %v", err)
 		return
 	}
-	lConn.SetReadDeadline(time.Time{})
+	_ = lConn.SetReadDeadline(time.Time{})
 	if string(sidBuf[:n]) != natHoleRespMsg.Sid {
 		xl.Warn("incorrect sid from client")
 		return
@@ -308,7 +310,7 @@ func (sv *XTCPVisitor) handleConn(userConn net.Conn) {
 
 	fmuxCfg := fmux.DefaultConfig()
 	fmuxCfg.KeepAliveInterval = 5 * time.Second
-	fmuxCfg.LogOutput = ioutil.Discard
+	fmuxCfg.LogOutput = io.Discard
 	sess, err := fmux.Client(remote, fmuxCfg)
 	if err != nil {
 		xl.Error("create yamux session error: %v", err)
@@ -353,7 +355,7 @@ type SUDPVisitor struct {
 func (sv *SUDPVisitor) Run() (err error) {
 	xl := xlog.FromContextSafe(sv.ctx)
 
-	addr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", sv.cfg.BindAddr, sv.cfg.BindPort))
+	addr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(sv.cfg.BindAddr, strconv.Itoa(sv.cfg.BindPort)))
 	if err != nil {
 		return fmt.Errorf("sudp ResolveUDPAddr error: %v", err)
 	}
@@ -377,29 +379,33 @@ func (sv *SUDPVisitor) Run() (err error) {
 func (sv *SUDPVisitor) dispatcher() {
 	xl := xlog.FromContextSafe(sv.ctx)
 
+	var (
+		visitorConn net.Conn
+		err         error
+
+		firstPacket *msg.UDPPacket
+	)
+
 	for {
-		// loop for get frpc to frps tcp conn
-		// setup worker
-		// wait worker to finished
-		// retry or exit
-		visitorConn, err := sv.getNewVisitorConn()
-		if err != nil {
-			// check if proxy is closed
-			// if checkCloseCh is close, we will return, other case we will continue to reconnect
-			select {
-			case <-sv.checkCloseCh:
+		select {
+		case firstPacket = <-sv.sendCh:
+			if firstPacket == nil {
 				xl.Info("frpc sudp visitor proxy is closed")
 				return
-			default:
 			}
+		case <-sv.checkCloseCh:
+			xl.Info("frpc sudp visitor proxy is closed")
+			return
+		}
 
-			time.Sleep(3 * time.Second)
-
+		visitorConn, err = sv.getNewVisitorConn()
+		if err != nil {
 			xl.Warn("newVisitorConn to frps error: %v, try to reconnect", err)
 			continue
 		}
 
-		sv.worker(visitorConn)
+		// visitorConn always be closed when worker done.
+		sv.worker(visitorConn, firstPacket)
 
 		select {
 		case <-sv.checkCloseCh:
@@ -409,7 +415,7 @@ func (sv *SUDPVisitor) dispatcher() {
 	}
 }
 
-func (sv *SUDPVisitor) worker(workConn net.Conn) {
+func (sv *SUDPVisitor) worker(workConn net.Conn, firstPacket *msg.UDPPacket) {
 	xl := xlog.FromContextSafe(sv.ctx)
 	xl.Debug("starting sudp proxy worker")
 
@@ -432,13 +438,13 @@ func (sv *SUDPVisitor) worker(workConn net.Conn) {
 			)
 
 			// frpc will send heartbeat in workConn to frpc visitor for keeping alive
-			conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+			_ = conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 			if rawMsg, errRet = msg.ReadMsg(conn); errRet != nil {
 				xl.Warn("read from workconn for user udp conn error: %v", errRet)
 				return
 			}
 
-			conn.SetReadDeadline(time.Time{})
+			_ = conn.SetReadDeadline(time.Time{})
 			switch m := rawMsg.(type) {
 			case *msg.Ping:
 				xl.Debug("frpc visitor get ping message from frpc")
@@ -463,6 +469,14 @@ func (sv *SUDPVisitor) worker(workConn net.Conn) {
 		}()
 
 		var errRet error
+		if firstPacket != nil {
+			if errRet = msg.WriteMsg(conn, firstPacket); errRet != nil {
+				xl.Warn("sender goroutine for udp work connection closed: %v", errRet)
+				return
+			}
+			xl.Trace("send udp package to workConn: %s", firstPacket.Content)
+		}
+
 		for {
 			select {
 			case udpMsg, ok := <-sv.sendCh:
@@ -510,12 +524,12 @@ func (sv *SUDPVisitor) getNewVisitorConn() (net.Conn, error) {
 	}
 
 	var newVisitorConnRespMsg msg.NewVisitorConnResp
-	visitorConn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	_ = visitorConn.SetReadDeadline(time.Now().Add(10 * time.Second))
 	err = msg.ReadMsgInto(visitorConn, &newVisitorConnRespMsg)
 	if err != nil {
 		return nil, fmt.Errorf("frpc read newVisitorConnRespMsg error: %v", err)
 	}
-	visitorConn.SetReadDeadline(time.Time{})
+	_ = visitorConn.SetReadDeadline(time.Time{})
 
 	if newVisitorConnRespMsg.Error != "" {
 		return nil, fmt.Errorf("start new visitor connection error: %s", newVisitorConnRespMsg.Error)

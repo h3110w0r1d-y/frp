@@ -18,14 +18,14 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/spf13/cobra"
+
 	"github.com/fatedier/frp/pkg/auth"
 	"github.com/fatedier/frp/pkg/config"
 	"github.com/fatedier/frp/pkg/util/log"
 	"github.com/fatedier/frp/pkg/util/util"
 	"github.com/fatedier/frp/pkg/util/version"
 	"github.com/fatedier/frp/server"
-
-	"github.com/spf13/cobra"
 )
 
 const (
@@ -37,32 +37,32 @@ var (
 	cfgFile     string
 	showVersion bool
 
-	bindAddr          string
-	bindPort          int
-	bindUDPPort       int
-	kcpBindPort       int
-	proxyBindAddr     string
-	vhostBindAddr     string
-	vhostHTTPPort     int
-	vhostHTTPSPort    int
-	vhostHTTPTimeout  int64
-	dashboardAddr     string
-	dashboardPort     int
-	dashboardUser     string
-	dashboardPwd      string
-	enablePrometheus  bool
-	assetsDir         string
-	logFile           string
-	logLevel          string
-	logMaxDays        int64
-	disableLogColor   bool
-	token             string
-	subDomainHost     string
-	tcpMux            bool
-	allowPorts        string
-	maxPoolCount      int64
-	maxPortsPerClient int64
-	tlsOnly           bool
+	bindAddr             string
+	bindPort             int
+	bindUDPPort          int
+	kcpBindPort          int
+	proxyBindAddr        string
+	vhostBindAddr        string
+	vhostHTTPPort        int
+	vhostHTTPSPort       int
+	vhostHTTPTimeout     int64
+	dashboardAddr        string
+	dashboardPort        int
+	dashboardUser        string
+	dashboardPwd         string
+	enablePrometheus     bool
+	logFile              string
+	logLevel             string
+	logMaxDays           int64
+	disableLogColor      bool
+	token                string
+	subDomainHost        string
+	allowPorts           string
+	maxPortsPerClient    int64
+	tlsOnly              bool
+	dashboardTLSMode     bool
+	dashboardTLSCertFile string
+	dashboardTLSKeyFile  string
 )
 
 func init() {
@@ -93,6 +93,9 @@ func init() {
 	rootCmd.PersistentFlags().StringVarP(&allowPorts, "allow_ports", "", "", "allow ports")
 	rootCmd.PersistentFlags().Int64VarP(&maxPortsPerClient, "max_ports_per_client", "", 0, "max ports per client")
 	rootCmd.PersistentFlags().BoolVarP(&tlsOnly, "tls_only", "", false, "frps tls only")
+	rootCmd.PersistentFlags().BoolVarP(&dashboardTLSMode, "dashboard_tls_mode", "", false, "dashboard tls mode")
+	rootCmd.PersistentFlags().StringVarP(&dashboardTLSCertFile, "dashboard_tls_cert_file", "", "", "dashboard tls cert file")
+	rootCmd.PersistentFlags().StringVarP(&dashboardTLSKeyFile, "dashboard_tls_key_file", "", "", "dashboard tls key file")
 }
 
 var rootCmd = &cobra.Command{
@@ -147,7 +150,7 @@ func parseServerCommonCfg(fileType int, source []byte) (cfg config.ServerCommonC
 	cfg.Complete()
 	err = cfg.Validate()
 	if err != nil {
-		err = fmt.Errorf("Parse config error: %v", err)
+		err = fmt.Errorf("parse config error: %v", err)
 		return
 	}
 	return
@@ -170,6 +173,9 @@ func parseServerCommonCfgFromCmd() (cfg config.ServerCommonConf, err error) {
 	cfg.DashboardUser = dashboardUser
 	cfg.DashboardPwd = dashboardPwd
 	cfg.EnablePrometheus = enablePrometheus
+	cfg.DashboardTLSCertFile = dashboardTLSCertFile
+	cfg.DashboardTLSKeyFile = dashboardTLSKeyFile
+	cfg.DashboardTLSMode = dashboardTLSMode
 	cfg.LogFile = logFile
 	cfg.LogLevel = logLevel
 	cfg.LogMaxDays = logMaxDays
@@ -183,7 +189,7 @@ func parseServerCommonCfgFromCmd() (cfg config.ServerCommonConf, err error) {
 		// e.g. 1000-2000,2001,2002,3000-4000
 		ports, errRet := util.ParseRangeNumbers(allowPorts)
 		if errRet != nil {
-			err = fmt.Errorf("Parse conf error: allow_ports: %v", errRet)
+			err = fmt.Errorf("parse conf error: allow_ports: %v", errRet)
 			return
 		}
 

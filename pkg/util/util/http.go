@@ -15,6 +15,7 @@
 package util
 
 import (
+	"encoding/base64"
 	"net"
 	"net/http"
 	"strings"
@@ -34,15 +35,18 @@ func OkResponse() *http.Response {
 	return res
 }
 
-// TODO: use "CanonicalHost" func to replace all "GetHostFromAddr" func.
-func GetHostFromAddr(addr string) (host string) {
-	strs := strings.Split(addr, ":")
-	if len(strs) > 1 {
-		host = strs[0]
-	} else {
-		host = addr
+func ProxyUnauthorizedResponse() *http.Response {
+	header := make(http.Header)
+	header.Set("Proxy-Authenticate", `Basic realm="Restricted"`)
+	res := &http.Response{
+		Status:     "Proxy Authentication Required",
+		StatusCode: 407,
+		Proto:      "HTTP/1.1",
+		ProtoMajor: 1,
+		ProtoMinor: 1,
+		Header:     header,
 	}
-	return
+	return res
 }
 
 // canonicalHost strips port from host if present and returns the canonicalized
@@ -56,10 +60,8 @@ func CanonicalHost(host string) (string, error) {
 			return "", err
 		}
 	}
-	if strings.HasSuffix(host, ".") {
-		// Strip trailing dot from fully qualified domain names.
-		host = host[:len(host)-1]
-	}
+	// Strip trailing dot from fully qualified domain names.
+	host = strings.TrimSuffix(host, ".")
 	return host, nil
 }
 
@@ -74,4 +76,22 @@ func hasPort(host string) bool {
 		return true
 	}
 	return host[0] == '[' && strings.Contains(host, "]:")
+}
+
+func ParseBasicAuth(auth string) (username, password string, ok bool) {
+	const prefix = "Basic "
+	// Case insensitive prefix match. See Issue 22736.
+	if len(auth) < len(prefix) || !strings.EqualFold(auth[:len(prefix)], prefix) {
+		return
+	}
+	c, err := base64.StdEncoding.DecodeString(auth[len(prefix):])
+	if err != nil {
+		return
+	}
+	cs := string(c)
+	s := strings.IndexByte(cs, ':')
+	if s < 0 {
+		return
+	}
+	return cs[:s], cs[s+1:], true
 }

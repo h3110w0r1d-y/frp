@@ -17,15 +17,20 @@ package client
 import (
 	"context"
 	"crypto/tls"
-	"errors"
 	"fmt"
-	"io/ioutil"
+	"io"
+	"math/rand"
 	"net"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/fatedier/golib/crypto"
+	libdial "github.com/fatedier/golib/net/dial"
+	fmux "github.com/hashicorp/yamux"
 
 	"github.com/fatedier/frp/assets"
 	"github.com/fatedier/frp/pkg/auth"
@@ -34,11 +39,15 @@ import (
 	"github.com/fatedier/frp/pkg/transport"
 	"github.com/fatedier/frp/pkg/util/log"
 	frpNet "github.com/fatedier/frp/pkg/util/net"
+	"github.com/fatedier/frp/pkg/util/util"
 	"github.com/fatedier/frp/pkg/util/version"
 	"github.com/fatedier/frp/pkg/util/xlog"
-
-	fmux "github.com/hashicorp/yamux"
 )
+
+func init() {
+	crypto.DefaultSalt = "frp"
+	rand.Seed(time.Now().UnixNano())
+}
 
 // Service is a client service.
 type Service struct {
@@ -72,8 +81,12 @@ type Service struct {
 	cancel context.CancelFunc
 }
 
-func NewService(cfg config.ClientCommonConf, pxyCfgs map[string]config.ProxyConf, visitorCfgs map[string]config.VisitorConf, cfgFile string) (svr *Service, err error) {
-
+func NewService(
+	cfg config.ClientCommonConf,
+	pxyCfgs map[string]config.ProxyConf,
+	visitorCfgs map[string]config.VisitorConf,
+	cfgFile string,
+) (svr *Service, err error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	svr = &Service{
 		authSetter:  auth.NewAuthSetter(cfg.ClientConfig),
@@ -97,6 +110,21 @@ func (svr *Service) GetController() *Control {
 func (svr *Service) Run() error {
 	xl := xlog.FromContextSafe(svr.ctx)
 
+	// set custom DNSServer
+	if svr.cfg.DNSServer != "" {
+		dnsAddr := svr.cfg.DNSServer
+		if !strings.Contains(dnsAddr, ":") {
+			dnsAddr += ":53"
+		}
+		// Change default dns server for frpc
+		net.DefaultResolver = &net.Resolver{
+			PreferGo: true,
+			Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+				return net.Dial("udp", dnsAddr)
+			},
+		}
+	}
+
 	// login to frps
 	for {
 		conn, session, err := svr.login()
@@ -108,7 +136,7 @@ func (svr *Service) Run() error {
 			if svr.cfg.LoginFailExit {
 				return err
 			}
-			time.Sleep(10 * time.Second)
+			util.RandomSleep(10*time.Second, 0.9, 1.1)
 		} else {
 			// login success
 			ctl := NewControl(svr.ctx, svr.runID, conn, session, svr.cfg, svr.pxyCfgs, svr.visitorCfgs, svr.serverUDPPort, svr.authSetter)
@@ -124,13 +152,10 @@ func (svr *Service) Run() error {
 
 	if svr.cfg.AdminPort != 0 {
 		// Init admin server assets
-		err := assets.Load(svr.cfg.AssetsDir)
-		if err != nil {
-			return fmt.Errorf("Load assets error: %v", err)
-		}
+		assets.Load(svr.cfg.AssetsDir)
 
 		address := net.JoinHostPort(svr.cfg.AdminAddr, strconv.Itoa(svr.cfg.AdminPort))
-		err = svr.RunAdminServer(address)
+		err := svr.RunAdminServer(address)
 		if err != nil {
 			log.Warn("run admin server error: %v", err)
 		}
@@ -160,8 +185,11 @@ func (svr *Service) keepControllerWorking() {
 
 		// the first three retry with no delay
 		if reconnectCounts > 3 {
-			time.Sleep(reconnectDelay)
+			util.RandomSleep(reconnectDelay, 0.9, 1.1)
+			xl.Info("wait %v to reconnect", reconnectDelay)
 			reconnectDelay *= 2
+		} else {
+			util.RandomSleep(time.Second, 0, 0.5)
 		}
 		reconnectCounts++
 
@@ -174,21 +202,19 @@ func (svr *Service) keepControllerWorking() {
 		}
 
 		for {
+			if atomic.LoadUint32(&svr.exit) != 0 {
+				return
+			}
+
 			xl.Info("try to reconnect to server...")
 			conn, session, err := svr.login()
 			if err != nil {
-				xl.Warn("reconnect to server error: %v", err)
-				time.Sleep(delayTime)
+				xl.Warn("reconnect to server error: %v, wait %v for another retry", err, delayTime)
+				util.RandomSleep(delayTime, 0.9, 1.1)
 
-				opErr := &net.OpError{}
-				// quick retry for dial error
-				if errors.As(err, &opErr) && opErr.Op == "dial" {
-					delayTime = 2 * time.Second
-				} else {
-					delayTime = delayTime * 2
-					if delayTime > maxDelayTime {
-						delayTime = maxDelayTime
-					}
+				delayTime *= 2
+				if delayTime > maxDelayTime {
+					delayTime = maxDelayTime
 				}
 				continue
 			}
@@ -231,8 +257,35 @@ func (svr *Service) login() (conn net.Conn, session *fmux.Session, err error) {
 		}
 	}
 
-	address := net.JoinHostPort(svr.cfg.ServerAddr, strconv.Itoa(svr.cfg.ServerPort))
-	conn, err = frpNet.ConnectServerByProxyWithTLS(svr.cfg.HTTPProxy, svr.cfg.Protocol, address, tlsConfig)
+	proxyType, addr, auth, err := libdial.ParseProxyURL(svr.cfg.HTTPProxy)
+	if err != nil {
+		xl.Error("fail to parse proxy url")
+		return
+	}
+	dialOptions := []libdial.DialOption{}
+	protocol := svr.cfg.Protocol
+	if protocol == "websocket" {
+		protocol = "tcp"
+		dialOptions = append(dialOptions, libdial.WithAfterHook(libdial.AfterHook{Hook: frpNet.DialHookWebsocket()}))
+	}
+	if svr.cfg.ConnectServerLocalIP != "" {
+		dialOptions = append(dialOptions, libdial.WithLocalAddr(svr.cfg.ConnectServerLocalIP))
+	}
+	dialOptions = append(dialOptions,
+		libdial.WithProtocol(protocol),
+		libdial.WithTimeout(time.Duration(svr.cfg.DialServerTimeout)*time.Second),
+		libdial.WithKeepAlive(time.Duration(svr.cfg.DialServerKeepAlive)*time.Second),
+		libdial.WithProxy(proxyType, addr),
+		libdial.WithProxyAuth(auth),
+		libdial.WithTLSConfig(tlsConfig),
+		libdial.WithAfterHook(libdial.AfterHook{
+			Hook: frpNet.DialHookCustomTLSHeadByte(tlsConfig != nil, svr.cfg.DisableCustomTLSFirstByte),
+		}),
+	)
+	conn, err = libdial.Dial(
+		net.JoinHostPort(svr.cfg.ServerAddr, strconv.Itoa(svr.cfg.ServerPort)),
+		dialOptions...,
+	)
 	if err != nil {
 		return
 	}
@@ -248,8 +301,8 @@ func (svr *Service) login() (conn net.Conn, session *fmux.Session, err error) {
 
 	if svr.cfg.TCPMux {
 		fmuxCfg := fmux.DefaultConfig()
-		fmuxCfg.KeepAliveInterval = 20 * time.Second
-		fmuxCfg.LogOutput = ioutil.Discard
+		fmuxCfg.KeepAliveInterval = time.Duration(svr.cfg.TCPMuxKeepaliveInterval) * time.Second
+		fmuxCfg.LogOutput = io.Discard
 		session, err = fmux.Client(conn, fmuxCfg)
 		if err != nil {
 			return
@@ -284,11 +337,11 @@ func (svr *Service) login() (conn net.Conn, session *fmux.Session, err error) {
 	}
 
 	var loginRespMsg msg.LoginResp
-	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 	if err = msg.ReadMsgInto(conn, &loginRespMsg); err != nil {
 		return
 	}
-	conn.SetReadDeadline(time.Time{})
+	_ = conn.SetReadDeadline(time.Time{})
 
 	if loginRespMsg.Error != "" {
 		err = fmt.Errorf("%s", loginRespMsg.Error)
@@ -311,13 +364,28 @@ func (svr *Service) ReloadConf(pxyCfgs map[string]config.ProxyConf, visitorCfgs 
 	svr.visitorCfgs = visitorCfgs
 	svr.cfgMu.Unlock()
 
-	return svr.ctl.ReloadConf(pxyCfgs, visitorCfgs)
+	svr.ctlMu.RLock()
+	ctl := svr.ctl
+	svr.ctlMu.RUnlock()
+
+	if ctl != nil {
+		return svr.ctl.ReloadConf(pxyCfgs, visitorCfgs)
+	}
+	return nil
 }
 
 func (svr *Service) Close() {
+	svr.GracefulClose(time.Duration(0))
+}
+
+func (svr *Service) GracefulClose(d time.Duration) {
 	atomic.StoreUint32(&svr.exit, 1)
+
+	svr.ctlMu.RLock()
 	if svr.ctl != nil {
-		svr.ctl.Close()
+		svr.ctl.GracefulClose(d)
 	}
+	svr.ctlMu.RUnlock()
+
 	svr.cancel()
 }

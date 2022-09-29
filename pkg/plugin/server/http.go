@@ -20,7 +20,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"net/url"
 	"reflect"
@@ -43,12 +43,12 @@ type httpPlugin struct {
 }
 
 func NewHTTPPluginOptions(options HTTPPluginOptions) Plugin {
-	var url = fmt.Sprintf("%s%s", options.Addr, options.Path)
+	url := fmt.Sprintf("%s%s", options.Addr, options.Path)
 
 	var client *http.Client
 	if strings.HasPrefix(url, "https://") {
 		tr := &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: options.TLSVerify == false},
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: !options.TLSVerify},
 		}
 		client = &http.Client{Transport: tr}
 	} else {
@@ -116,7 +116,7 @@ func (p *httpPlugin) do(ctx context.Context, r *Request, res *Response) error {
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("do http request error code: %d", resp.StatusCode)
 	}
-	buf, err = ioutil.ReadAll(resp.Body)
+	buf, err = io.ReadAll(resp.Body)
 	if err != nil {
 		return err
 	}

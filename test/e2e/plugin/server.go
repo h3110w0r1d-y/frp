@@ -4,29 +4,34 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/onsi/ginkgo"
+
 	plugin "github.com/fatedier/frp/pkg/plugin/server"
 	"github.com/fatedier/frp/pkg/transport"
 	"github.com/fatedier/frp/test/e2e/framework"
 	"github.com/fatedier/frp/test/e2e/framework/consts"
-
-	. "github.com/onsi/ginkgo"
 )
 
-var _ = Describe("[Feature: Server-Plugins]", func() {
+var _ = ginkgo.Describe("[Feature: Server-Plugins]", func() {
 	f := framework.NewDefaultFramework()
 
-	Describe("Login", func() {
+	ginkgo.Describe("Login", func() {
 		newFunc := func() *plugin.Request {
 			var r plugin.Request
 			r.Content = &plugin.LoginContent{}
 			return &r
 		}
 
-		It("Auth for custom meta token", func() {
+		ginkgo.It("Auth for custom meta token", func() {
 			localPort := f.AllocPort()
+
+			clientAddressGot := false
 			handler := func(req *plugin.Request) *plugin.Response {
 				var ret plugin.Response
 				content := req.Content.(*plugin.LoginContent)
+				if content.ClientAddress != "" {
+					clientAddressGot = true
+				}
 				if content.Metas["token"] == "123" {
 					ret.Unchange = true
 				} else {
@@ -69,17 +74,19 @@ var _ = Describe("[Feature: Server-Plugins]", func() {
 
 			framework.NewRequestExpect(f).Port(remotePort).Ensure()
 			framework.NewRequestExpect(f).Port(remotePort2).ExpectError(true).Ensure()
+
+			framework.ExpectTrue(clientAddressGot)
 		})
 	})
 
-	Describe("NewProxy", func() {
+	ginkgo.Describe("NewProxy", func() {
 		newFunc := func() *plugin.Request {
 			var r plugin.Request
 			r.Content = &plugin.NewProxyContent{}
 			return &r
 		}
 
-		It("Validate Info", func() {
+		ginkgo.It("Validate Info", func() {
 			localPort := f.AllocPort()
 			handler := func(req *plugin.Request) *plugin.Response {
 				var ret plugin.Response
@@ -116,7 +123,7 @@ var _ = Describe("[Feature: Server-Plugins]", func() {
 			framework.NewRequestExpect(f).Port(remotePort).Ensure()
 		})
 
-		It("Mofify RemotePort", func() {
+		ginkgo.It("Mofify RemotePort", func() {
 			localPort := f.AllocPort()
 			remotePort := f.AllocPort()
 			handler := func(req *plugin.Request) *plugin.Response {
@@ -143,7 +150,7 @@ var _ = Describe("[Feature: Server-Plugins]", func() {
 			type = tcp
 			local_port = {{ .%s }}
 			remote_port = 0
-			`, framework.TCPEchoServerPort, remotePort)
+			`, framework.TCPEchoServerPort)
 
 			f.RunProcesses([]string{serverConf}, []string{clientConf})
 
@@ -151,14 +158,64 @@ var _ = Describe("[Feature: Server-Plugins]", func() {
 		})
 	})
 
-	Describe("Ping", func() {
+	ginkgo.Describe("CloseProxy", func() {
+		newFunc := func() *plugin.Request {
+			var r plugin.Request
+			r.Content = &plugin.CloseProxyContent{}
+			return &r
+		}
+
+		ginkgo.It("Validate Info", func() {
+			localPort := f.AllocPort()
+			var recordProxyName string
+			handler := func(req *plugin.Request) *plugin.Response {
+				var ret plugin.Response
+				content := req.Content.(*plugin.CloseProxyContent)
+				recordProxyName = content.ProxyName
+				return &ret
+			}
+			pluginServer := NewHTTPPluginServer(localPort, newFunc, handler, nil)
+
+			f.RunServer("", pluginServer)
+
+			serverConf := consts.DefaultServerConfig + fmt.Sprintf(`
+			[plugin.test]
+			addr = 127.0.0.1:%d
+			path = /handler
+			ops = CloseProxy
+			`, localPort)
+			clientConf := consts.DefaultClientConfig
+
+			remotePort := f.AllocPort()
+			clientConf += fmt.Sprintf(`
+			[tcp]
+			type = tcp
+			local_port = {{ .%s }}
+			remote_port = %d
+			`, framework.TCPEchoServerPort, remotePort)
+
+			_, clients := f.RunProcesses([]string{serverConf}, []string{clientConf})
+
+			framework.NewRequestExpect(f).Port(remotePort).Ensure()
+
+			for _, c := range clients {
+				_ = c.Stop()
+			}
+
+			time.Sleep(1 * time.Second)
+
+			framework.ExpectEqual(recordProxyName, "tcp")
+		})
+	})
+
+	ginkgo.Describe("Ping", func() {
 		newFunc := func() *plugin.Request {
 			var r plugin.Request
 			r.Content = &plugin.PingContent{}
 			return &r
 		}
 
-		It("Validate Info", func() {
+		ginkgo.It("Validate Info", func() {
 			localPort := f.AllocPort()
 
 			var record string
@@ -201,14 +258,14 @@ var _ = Describe("[Feature: Server-Plugins]", func() {
 		})
 	})
 
-	Describe("NewWorkConn", func() {
+	ginkgo.Describe("NewWorkConn", func() {
 		newFunc := func() *plugin.Request {
 			var r plugin.Request
 			r.Content = &plugin.NewWorkConnContent{}
 			return &r
 		}
 
-		It("Validate Info", func() {
+		ginkgo.It("Validate Info", func() {
 			localPort := f.AllocPort()
 
 			var record string
@@ -247,13 +304,13 @@ var _ = Describe("[Feature: Server-Plugins]", func() {
 		})
 	})
 
-	Describe("NewUserConn", func() {
+	ginkgo.Describe("NewUserConn", func() {
 		newFunc := func() *plugin.Request {
 			var r plugin.Request
 			r.Content = &plugin.NewUserConnContent{}
 			return &r
 		}
-		It("Validate Info", func() {
+		ginkgo.It("Validate Info", func() {
 			localPort := f.AllocPort()
 
 			var record string
@@ -292,13 +349,13 @@ var _ = Describe("[Feature: Server-Plugins]", func() {
 		})
 	})
 
-	Describe("HTTPS Protocol", func() {
+	ginkgo.Describe("HTTPS Protocol", func() {
 		newFunc := func() *plugin.Request {
 			var r plugin.Request
 			r.Content = &plugin.NewUserConnContent{}
 			return &r
 		}
-		It("Validate Login Info, disable tls verify", func() {
+		ginkgo.It("Validate Login Info, disable tls verify", func() {
 			localPort := f.AllocPort()
 
 			var record string

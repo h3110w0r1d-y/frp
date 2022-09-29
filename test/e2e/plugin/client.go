@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strconv"
 
+	"github.com/onsi/ginkgo"
+
 	"github.com/fatedier/frp/pkg/transport"
 	"github.com/fatedier/frp/test/e2e/framework"
 	"github.com/fatedier/frp/test/e2e/framework/consts"
@@ -12,16 +14,13 @@ import (
 	"github.com/fatedier/frp/test/e2e/pkg/cert"
 	"github.com/fatedier/frp/test/e2e/pkg/port"
 	"github.com/fatedier/frp/test/e2e/pkg/request"
-	"github.com/fatedier/frp/test/e2e/pkg/utils"
-
-	. "github.com/onsi/ginkgo"
 )
 
-var _ = Describe("[Feature: Client-Plugins]", func() {
+var _ = ginkgo.Describe("[Feature: Client-Plugins]", func() {
 	f := framework.NewDefaultFramework()
 
-	Describe("UnixDomainSocket", func() {
-		It("Expose a unix domain socket echo server", func() {
+	ginkgo.Describe("UnixDomainSocket", func() {
+		ginkgo.It("Expose a unix domain socket echo server", func() {
 			serverConf := consts.DefaultServerConfig
 			clientConf := consts.DefaultClientConfig
 
@@ -77,7 +76,7 @@ var _ = Describe("[Feature: Client-Plugins]", func() {
 		})
 	})
 
-	It("http_proxy", func() {
+	ginkgo.It("http_proxy", func() {
 		serverConf := consts.DefaultServerConfig
 		clientConf := consts.DefaultClientConfig
 
@@ -109,7 +108,7 @@ var _ = Describe("[Feature: Client-Plugins]", func() {
 		})
 	})
 
-	It("socks5 proxy", func() {
+	ginkgo.It("socks5 proxy", func() {
 		serverConf := consts.DefaultServerConfig
 		clientConf := consts.DefaultClientConfig
 
@@ -136,7 +135,7 @@ var _ = Describe("[Feature: Client-Plugins]", func() {
 		}).Ensure()
 	})
 
-	It("static_file", func() {
+	ginkgo.It("static_file", func() {
 		vhostPort := f.AllocPort()
 		serverConf := consts.DefaultServerConfig + fmt.Sprintf(`
 		vhost_http_port = %d
@@ -181,13 +180,11 @@ var _ = Describe("[Feature: Client-Plugins]", func() {
 
 		// from http proxy with auth
 		framework.NewRequestExpect(f).Request(
-			framework.NewHTTPRequest().HTTPHost("other.example.com").HTTPPath("/test_static_file").Port(vhostPort).HTTPHeaders(map[string]string{
-				"Authorization": utils.BasicAuth("abc", "123"),
-			}),
+			framework.NewHTTPRequest().HTTPHost("other.example.com").HTTPPath("/test_static_file").Port(vhostPort).HTTPAuth("abc", "123"),
 		).ExpectResp([]byte("foo")).Ensure()
 	})
 
-	It("http2https", func() {
+	ginkgo.It("http2https", func() {
 		serverConf := consts.DefaultServerConfig
 		vhostHTTPPort := f.AllocPort()
 		serverConf += fmt.Sprintf(`
@@ -209,7 +206,7 @@ var _ = Describe("[Feature: Client-Plugins]", func() {
 		framework.ExpectNoError(err)
 		localServer := httpserver.New(
 			httpserver.WithBindPort(localPort),
-			httpserver.WithTlsConfig(tlsConfig),
+			httpserver.WithTLSConfig(tlsConfig),
 			httpserver.WithResponse([]byte("test")),
 		)
 		f.RunServer("", localServer)
@@ -223,7 +220,7 @@ var _ = Describe("[Feature: Client-Plugins]", func() {
 			Ensure()
 	})
 
-	It("https2http", func() {
+	ginkgo.It("https2http", func() {
 		generator := &cert.SelfSignedCertGenerator{}
 		artifacts, err := generator.Generate("example.com")
 		framework.ExpectNoError(err)
@@ -267,7 +264,7 @@ var _ = Describe("[Feature: Client-Plugins]", func() {
 			Ensure()
 	})
 
-	It("https2https", func() {
+	ginkgo.It("https2https", func() {
 		generator := &cert.SelfSignedCertGenerator{}
 		artifacts, err := generator.Generate("example.com")
 		framework.ExpectNoError(err)
@@ -298,7 +295,7 @@ var _ = Describe("[Feature: Client-Plugins]", func() {
 		localServer := httpserver.New(
 			httpserver.WithBindPort(localPort),
 			httpserver.WithResponse([]byte("test")),
-			httpserver.WithTlsConfig(tlsConfig),
+			httpserver.WithTLSConfig(tlsConfig),
 		)
 		f.RunServer("", localServer)
 

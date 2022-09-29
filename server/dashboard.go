@@ -15,46 +15,59 @@
 package server
 
 import (
+	"crypto/tls"
 	"net"
 	"net/http"
+	"net/http/pprof"
 	"time"
-
-	"github.com/fatedier/frp/assets"
-	frpNet "github.com/fatedier/frp/pkg/util/net"
 
 	"github.com/gorilla/mux"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+
+	"github.com/fatedier/frp/assets"
+	frpNet "github.com/fatedier/frp/pkg/util/net"
 )
 
 var (
-	httpServerReadTimeout  = 10 * time.Second
-	httpServerWriteTimeout = 10 * time.Second
+	httpServerReadTimeout  = 60 * time.Second
+	httpServerWriteTimeout = 60 * time.Second
 )
 
 func (svr *Service) RunDashboardServer(address string) (err error) {
 	// url router
 	router := mux.NewRouter()
+	router.HandleFunc("/healthz", svr.Healthz)
+
+	// debug
+	if svr.cfg.PprofEnable {
+		router.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+		router.HandleFunc("/debug/pprof/profile", pprof.Profile)
+		router.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+		router.HandleFunc("/debug/pprof/trace", pprof.Trace)
+		router.PathPrefix("/debug/pprof/").HandlerFunc(pprof.Index)
+	}
+
+	subRouter := router.NewRoute().Subrouter()
 
 	user, passwd := svr.cfg.DashboardUser, svr.cfg.DashboardPwd
-	router.Use(frpNet.NewHTTPAuthMiddleware(user, passwd).Middleware)
+	subRouter.Use(frpNet.NewHTTPAuthMiddleware(user, passwd).Middleware)
 
 	// metrics
 	if svr.cfg.EnablePrometheus {
-		router.Handle("/metrics", promhttp.Handler())
+		subRouter.Handle("/metrics", promhttp.Handler())
 	}
 
 	// api, see dashboard_api.go
-	router.HandleFunc("/api/serverinfo", svr.APIServerInfo).Methods("GET")
-	router.HandleFunc("/api/proxy/{type}", svr.APIProxyByType).Methods("GET")
-	router.HandleFunc("/api/proxy/{type}/{name}", svr.APIProxyByTypeAndName).Methods("GET")
-	router.HandleFunc("/api/traffic/{name}", svr.APIProxyTraffic).Methods("GET")
-	router.HandleFunc("/healthz", svr.Healthz)
+	subRouter.HandleFunc("/api/serverinfo", svr.APIServerInfo).Methods("GET")
+	subRouter.HandleFunc("/api/proxy/{type}", svr.APIProxyByType).Methods("GET")
+	subRouter.HandleFunc("/api/proxy/{type}/{name}", svr.APIProxyByTypeAndName).Methods("GET")
+	subRouter.HandleFunc("/api/traffic/{name}", svr.APIProxyTraffic).Methods("GET")
 
 	// view
-	router.Handle("/favicon.ico", http.FileServer(assets.FileSystem)).Methods("GET")
-	router.PathPrefix("/static/").Handler(frpNet.MakeHTTPGzipHandler(http.StripPrefix("/static/", http.FileServer(assets.FileSystem)))).Methods("GET")
+	subRouter.Handle("/favicon.ico", http.FileServer(assets.FileSystem)).Methods("GET")
+	subRouter.PathPrefix("/static/").Handler(frpNet.MakeHTTPGzipHandler(http.StripPrefix("/static/", http.FileServer(assets.FileSystem)))).Methods("GET")
 
-	router.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+	subRouter.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/static/", http.StatusMovedPermanently)
 	})
 
@@ -64,14 +77,23 @@ func (svr *Service) RunDashboardServer(address string) (err error) {
 		ReadTimeout:  httpServerReadTimeout,
 		WriteTimeout: httpServerWriteTimeout,
 	}
-	if address == "" || address == ":" {
-		address = ":http"
-	}
 	ln, err := net.Listen("tcp", address)
 	if err != nil {
 		return err
 	}
 
-	go server.Serve(ln)
+	if svr.cfg.DashboardTLSMode {
+		cert, err := tls.LoadX509KeyPair(svr.cfg.DashboardTLSCertFile, svr.cfg.DashboardTLSKeyFile)
+		if err != nil {
+			return err
+		}
+		tlsCfg := &tls.Config{
+			Certificates: []tls.Certificate{cert},
+		}
+		ln = tls.NewListener(ln, tlsCfg)
+	}
+	go func() {
+		_ = server.Serve(ln)
+	}()
 	return
 }

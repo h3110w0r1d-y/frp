@@ -17,14 +17,14 @@ package sub
 import (
 	"encoding/base64"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"os"
 	"strings"
 
-	"github.com/fatedier/frp/pkg/config"
-
 	"github.com/spf13/cobra"
+
+	"github.com/fatedier/frp/pkg/config"
 )
 
 func init() {
@@ -76,7 +76,7 @@ func reload(clientCfg config.ClientCommonConf) error {
 		return nil
 	}
 
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return err
 	}

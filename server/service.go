@@ -19,12 +19,15 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net"
 	"net/http"
 	"sort"
 	"strconv"
 	"time"
+
+	"github.com/fatedier/golib/net/mux"
+	fmux "github.com/hashicorp/yamux"
 
 	"github.com/fatedier/frp/assets"
 	"github.com/fatedier/frp/pkg/auth"
@@ -47,9 +50,6 @@ import (
 	"github.com/fatedier/frp/server/ports"
 	"github.com/fatedier/frp/server/proxy"
 	"github.com/fatedier/frp/server/visitor"
-
-	"github.com/fatedier/golib/net/mux"
-	fmux "github.com/hashicorp/yamux"
 )
 
 const (
@@ -124,28 +124,29 @@ func NewService(cfg config.ServerCommonConf) (svr *Service, err error) {
 	// Create tcpmux httpconnect multiplexer.
 	if cfg.TCPMuxHTTPConnectPort > 0 {
 		var l net.Listener
-		l, err = net.Listen("tcp", fmt.Sprintf("%s:%d", cfg.ProxyBindAddr, cfg.TCPMuxHTTPConnectPort))
+		address := net.JoinHostPort(cfg.ProxyBindAddr, strconv.Itoa(cfg.TCPMuxHTTPConnectPort))
+		l, err = net.Listen("tcp", address)
 		if err != nil {
-			err = fmt.Errorf("Create server listener error, %v", err)
+			err = fmt.Errorf("create server listener error, %v", err)
 			return
 		}
 
-		svr.rc.TCPMuxHTTPConnectMuxer, err = tcpmux.NewHTTPConnectTCPMuxer(l, vhostReadWriteTimeout)
+		svr.rc.TCPMuxHTTPConnectMuxer, err = tcpmux.NewHTTPConnectTCPMuxer(l, cfg.TCPMuxPassthrough, vhostReadWriteTimeout)
 		if err != nil {
-			err = fmt.Errorf("Create vhost tcpMuxer error, %v", err)
+			err = fmt.Errorf("create vhost tcpMuxer error, %v", err)
 			return
 		}
-		log.Info("tcpmux httpconnect multiplexer listen on %s:%d", cfg.ProxyBindAddr, cfg.TCPMuxHTTPConnectPort)
+		log.Info("tcpmux httpconnect multiplexer listen on %s, passthough: %v", address, cfg.TCPMuxPassthrough)
 	}
 
 	// Init all plugins
-	plugin_names := make([]string, 0, len(cfg.HTTPPlugins))
+	pluginNames := make([]string, 0, len(cfg.HTTPPlugins))
 	for n := range cfg.HTTPPlugins {
-		plugin_names = append(plugin_names, n)
+		pluginNames = append(pluginNames, n)
 	}
-	sort.Strings(plugin_names)
+	sort.Strings(pluginNames)
 
-	for _, name := range plugin_names {
+	for _, name := range pluginNames {
 		svr.pluginManager.Register(plugin.NewHTTPPluginOptions(cfg.HTTPPlugins[name]))
 		log.Info("plugin [%s] has been registered", name)
 	}
@@ -180,12 +181,15 @@ func NewService(cfg config.ServerCommonConf) (svr *Service, err error) {
 	address := net.JoinHostPort(cfg.BindAddr, strconv.Itoa(cfg.BindPort))
 	ln, err := net.Listen("tcp", address)
 	if err != nil {
-		err = fmt.Errorf("Create server listener error, %v", err)
+		err = fmt.Errorf("create server listener error, %v", err)
 		return
 	}
 
 	svr.muxer = mux.NewMux(ln)
-	go svr.muxer.Serve()
+	svr.muxer.SetKeepAlive(time.Duration(cfg.TCPKeepAlive) * time.Second)
+	go func() {
+		_ = svr.muxer.Serve()
+	}()
 	ln = svr.muxer.DefaultListener()
 
 	svr.listener = ln
@@ -196,10 +200,10 @@ func NewService(cfg config.ServerCommonConf) (svr *Service, err error) {
 		address := net.JoinHostPort(cfg.BindAddr, strconv.Itoa(cfg.KCPBindPort))
 		svr.kcpListener, err = frpNet.ListenKcp(address)
 		if err != nil {
-			err = fmt.Errorf("Listen on kcp address udp %s error: %v", address, err)
+			err = fmt.Errorf("listen on kcp address udp %s error: %v", address, err)
 			return
 		}
-		log.Info("frps kcp listen on udp %s:%d", cfg.BindAddr, cfg.KCPBindPort)
+		log.Info("frps kcp listen on udp %s", address)
 	}
 
 	// Listen for accepting connections from client using websocket protocol.
@@ -227,12 +231,14 @@ func NewService(cfg config.ServerCommonConf) (svr *Service, err error) {
 		} else {
 			l, err = net.Listen("tcp", address)
 			if err != nil {
-				err = fmt.Errorf("Create vhost http listener error, %v", err)
+				err = fmt.Errorf("create vhost http listener error, %v", err)
 				return
 			}
 		}
-		go server.Serve(l)
-		log.Info("http service listen on %s:%d", cfg.VhostBindAddr, cfg.VhostHTTPPort)
+		go func() {
+			_ = server.Serve(l)
+		}()
+		log.Info("http service listen on %s", address)
 	}
 
 	// Create https vhost muxer.
@@ -244,7 +250,7 @@ func NewService(cfg config.ServerCommonConf) (svr *Service, err error) {
 			address := net.JoinHostPort(cfg.VhostBindAddr, strconv.Itoa(cfg.VhostHTTPSPort))
 			l, err = net.Listen("tcp", address)
 			if err != nil {
-				err = fmt.Errorf("Create server listener error, %v", err)
+				err = fmt.Errorf("create server listener error, %v", err)
 				return
 			}
 			log.Info("https service listen on %s", address)
@@ -252,14 +258,15 @@ func NewService(cfg config.ServerCommonConf) (svr *Service, err error) {
 
 		svr.rc.VhostHTTPSMuxer, err = vhost.NewHTTPSMuxer(l, vhostReadWriteTimeout)
 		if err != nil {
-			err = fmt.Errorf("Create vhost httpsMuxer error, %v", err)
+			err = fmt.Errorf("create vhost httpsMuxer error, %v", err)
 			return
 		}
 	}
 
 	// frp tls listener
-	svr.tlsListener = svr.muxer.Listen(1, 1, func(data []byte) bool {
-		return int(data[0]) == frpNet.FRPTLSHeadByte
+	svr.tlsListener = svr.muxer.Listen(2, 1, func(data []byte) bool {
+		// tls first byte can be 0x16 only when vhost https port is not same with bind port
+		return int(data[0]) == frpNet.FRPTLSHeadByte || int(data[0]) == 0x16
 	})
 
 	// Create nat hole controller.
@@ -268,7 +275,7 @@ func NewService(cfg config.ServerCommonConf) (svr *Service, err error) {
 		address := net.JoinHostPort(cfg.BindAddr, strconv.Itoa(cfg.BindUDPPort))
 		nc, err = nathole.NewController(address)
 		if err != nil {
-			err = fmt.Errorf("Create nat hole controller error, %v", err)
+			err = fmt.Errorf("create nat hole controller error, %v", err)
 			return
 		}
 		svr.rc.NatHoleController = nc
@@ -279,19 +286,15 @@ func NewService(cfg config.ServerCommonConf) (svr *Service, err error) {
 	// Create dashboard web server.
 	if cfg.DashboardPort > 0 {
 		// Init dashboard assets
-		err = assets.Load(cfg.AssetsDir)
-		if err != nil {
-			err = fmt.Errorf("Load assets error: %v", err)
-			return
-		}
+		assets.Load(cfg.AssetsDir)
 
 		address := net.JoinHostPort(cfg.DashboardAddr, strconv.Itoa(cfg.DashboardPort))
 		err = svr.RunDashboardServer(address)
 		if err != nil {
-			err = fmt.Errorf("Create dashboard web server error, %v", err)
+			err = fmt.Errorf("create dashboard web server error, %v", err)
 			return
 		}
-		log.Info("Dashboard listen on %s:%d", cfg.DashboardAddr, cfg.DashboardPort)
+		log.Info("Dashboard listen on %s", address)
 		statsEnable = true
 	}
 	if statsEnable {
@@ -325,19 +328,20 @@ func (svr *Service) handleConnection(ctx context.Context, conn net.Conn) {
 		err    error
 	)
 
-	conn.SetReadDeadline(time.Now().Add(connReadTimeout))
+	_ = conn.SetReadDeadline(time.Now().Add(connReadTimeout))
 	if rawMsg, err = msg.ReadMsg(conn); err != nil {
 		log.Trace("Failed to read message: %v", err)
 		conn.Close()
 		return
 	}
-	conn.SetReadDeadline(time.Time{})
+	_ = conn.SetReadDeadline(time.Time{})
 
 	switch m := rawMsg.(type) {
 	case *msg.Login:
 		// server plugin hook
 		content := &plugin.LoginContent{
-			Login: *m,
+			Login:         *m,
+			ClientAddress: conn.RemoteAddr().String(),
 		}
 		retContent, err := svr.pluginManager.Login(content)
 		if err == nil {
@@ -349,7 +353,7 @@ func (svr *Service) handleConnection(ctx context.Context, conn net.Conn) {
 		// Otherwise send success message in control's work goroutine.
 		if err != nil {
 			xl.Warn("register control error: %v", err)
-			msg.WriteMsg(conn, &msg.LoginResp{
+			_ = msg.WriteMsg(conn, &msg.LoginResp{
 				Version: version.Full(),
 				Error:   util.GenerateResponseErrorString("register control error", err, svr.cfg.DetailedErrorsToClient),
 			})
@@ -362,13 +366,13 @@ func (svr *Service) handleConnection(ctx context.Context, conn net.Conn) {
 	case *msg.NewVisitorConn:
 		if err = svr.RegisterVisitorConn(conn, m); err != nil {
 			xl.Warn("register visitor conn error: %v", err)
-			msg.WriteMsg(conn, &msg.NewVisitorConnResp{
+			_ = msg.WriteMsg(conn, &msg.NewVisitorConnResp{
 				ProxyName: m.ProxyName,
 				Error:     util.GenerateResponseErrorString("register visitor conn error", err, svr.cfg.DetailedErrorsToClient),
 			})
 			conn.Close()
 		} else {
-			msg.WriteMsg(conn, &msg.NewVisitorConnResp{
+			_ = msg.WriteMsg(conn, &msg.NewVisitorConnResp{
 				ProxyName: m.ProxyName,
 				Error:     "",
 			})
@@ -395,20 +399,21 @@ func (svr *Service) HandleListener(l net.Listener) {
 
 		log.Trace("start check TLS connection...")
 		originConn := c
-		c, err = frpNet.CheckAndEnableTLSServerConnWithTimeout(c, svr.tlsConfig, svr.cfg.TLSOnly, connReadTimeout)
+		var isTLS, custom bool
+		c, isTLS, custom, err = frpNet.CheckAndEnableTLSServerConnWithTimeout(c, svr.tlsConfig, svr.cfg.TLSOnly, connReadTimeout)
 		if err != nil {
 			log.Warn("CheckAndEnableTLSServerConnWithTimeout error: %v", err)
 			originConn.Close()
 			continue
 		}
-		log.Trace("success check TLS connection")
+		log.Trace("check TLS connection success, isTLS: %v custom: %v", isTLS, custom)
 
-		// Start a new goroutine for dealing connections.
+		// Start a new goroutine to handle connection.
 		go func(ctx context.Context, frpConn net.Conn) {
 			if svr.cfg.TCPMux {
 				fmuxCfg := fmux.DefaultConfig()
-				fmuxCfg.KeepAliveInterval = 20 * time.Second
-				fmuxCfg.LogOutput = ioutil.Discard
+				fmuxCfg.KeepAliveInterval = time.Duration(svr.cfg.TCPMuxKeepaliveInterval) * time.Second
+				fmuxCfg.LogOutput = io.Discard
 				session, err := fmux.Server(frpConn, fmuxCfg)
 				if err != nil {
 					log.Warn("Failed to create mux connection: %v", err)
@@ -503,7 +508,7 @@ func (svr *Service) RegisterWorkConn(workConn net.Conn, newMsg *msg.NewWorkConn)
 	}
 	if err != nil {
 		xl.Warn("invalid NewWorkConn with run id [%s]", newMsg.RunID)
-		msg.WriteMsg(workConn, &msg.StartWorkConn{
+		_ = msg.WriteMsg(workConn, &msg.StartWorkConn{
 			Error: util.GenerateResponseErrorString("invalid NewWorkConn", err, ctl.serverCfg.DetailedErrorsToClient),
 		})
 		return fmt.Errorf("invalid NewWorkConn with run id [%s]", newMsg.RunID)

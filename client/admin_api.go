@@ -17,9 +17,12 @@ package client
 import (
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
+	"net"
 	"net/http"
+	"os"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/fatedier/frp/client/proxy"
@@ -46,7 +49,7 @@ func (svr *Service) apiReload(w http.ResponseWriter, r *http.Request) {
 		log.Info("api response [/api/reload], code [%d]", res.Code)
 		w.WriteHeader(res.Code)
 		if len(res.Msg) > 0 {
-			w.Write([]byte(res.Msg))
+			_, _ = w.Write([]byte(res.Msg))
 		}
 	}()
 
@@ -65,7 +68,6 @@ func (svr *Service) apiReload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	log.Info("success reload conf")
-	return
 }
 
 type StatusResp struct {
@@ -104,48 +106,48 @@ func NewProxyStatusResp(status *proxy.WorkingStatus, serverAddr string) ProxySta
 	switch cfg := status.Cfg.(type) {
 	case *config.TCPProxyConf:
 		if cfg.LocalPort != 0 {
-			psr.LocalAddr = fmt.Sprintf("%s:%d", cfg.LocalIP, cfg.LocalPort)
+			psr.LocalAddr = net.JoinHostPort(cfg.LocalIP, strconv.Itoa(cfg.LocalPort))
 		}
 		psr.Plugin = cfg.Plugin
 		if status.Err != "" {
-			psr.RemoteAddr = fmt.Sprintf("%s:%d", serverAddr, cfg.RemotePort)
+			psr.RemoteAddr = net.JoinHostPort(serverAddr, strconv.Itoa(cfg.RemotePort))
 		} else {
 			psr.RemoteAddr = serverAddr + status.RemoteAddr
 		}
 	case *config.UDPProxyConf:
 		if cfg.LocalPort != 0 {
-			psr.LocalAddr = fmt.Sprintf("%s:%d", cfg.LocalIP, cfg.LocalPort)
+			psr.LocalAddr = net.JoinHostPort(cfg.LocalIP, strconv.Itoa(cfg.LocalPort))
 		}
 		if status.Err != "" {
-			psr.RemoteAddr = fmt.Sprintf("%s:%d", serverAddr, cfg.RemotePort)
+			psr.RemoteAddr = net.JoinHostPort(serverAddr, strconv.Itoa(cfg.RemotePort))
 		} else {
 			psr.RemoteAddr = serverAddr + status.RemoteAddr
 		}
 	case *config.HTTPProxyConf:
 		if cfg.LocalPort != 0 {
-			psr.LocalAddr = fmt.Sprintf("%s:%d", cfg.LocalIP, cfg.LocalPort)
+			psr.LocalAddr = net.JoinHostPort(cfg.LocalIP, strconv.Itoa(cfg.LocalPort))
 		}
 		psr.Plugin = cfg.Plugin
 		psr.RemoteAddr = status.RemoteAddr
 	case *config.HTTPSProxyConf:
 		if cfg.LocalPort != 0 {
-			psr.LocalAddr = fmt.Sprintf("%s:%d", cfg.LocalIP, cfg.LocalPort)
+			psr.LocalAddr = net.JoinHostPort(cfg.LocalIP, strconv.Itoa(cfg.LocalPort))
 		}
 		psr.Plugin = cfg.Plugin
 		psr.RemoteAddr = status.RemoteAddr
 	case *config.STCPProxyConf:
 		if cfg.LocalPort != 0 {
-			psr.LocalAddr = fmt.Sprintf("%s:%d", cfg.LocalIP, cfg.LocalPort)
+			psr.LocalAddr = net.JoinHostPort(cfg.LocalIP, strconv.Itoa(cfg.LocalPort))
 		}
 		psr.Plugin = cfg.Plugin
 	case *config.XTCPProxyConf:
 		if cfg.LocalPort != 0 {
-			psr.LocalAddr = fmt.Sprintf("%s:%d", cfg.LocalIP, cfg.LocalPort)
+			psr.LocalAddr = net.JoinHostPort(cfg.LocalIP, strconv.Itoa(cfg.LocalPort))
 		}
 		psr.Plugin = cfg.Plugin
 	case *config.SUDPProxyConf:
 		if cfg.LocalPort != 0 {
-			psr.LocalAddr = fmt.Sprintf("%s:%d", cfg.LocalIP, cfg.LocalPort)
+			psr.LocalAddr = net.JoinHostPort(cfg.LocalIP, strconv.Itoa(cfg.LocalPort))
 		}
 		psr.Plugin = cfg.Plugin
 	}
@@ -170,7 +172,7 @@ func (svr *Service) apiStatus(w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		log.Info("Http response [/api/status]")
 		buf, _ = json.Marshal(&res)
-		w.Write(buf)
+		_, _ = w.Write(buf)
 	}()
 
 	ps := svr.ctl.pm.GetAllProxyStatus()
@@ -199,7 +201,6 @@ func (svr *Service) apiStatus(w http.ResponseWriter, r *http.Request) {
 	sort.Sort(ByProxyStatusResp(res.STCP))
 	sort.Sort(ByProxyStatusResp(res.XTCP))
 	sort.Sort(ByProxyStatusResp(res.SUDP))
-	return
 }
 
 // GET api/config
@@ -211,7 +212,7 @@ func (svr *Service) apiGetConfig(w http.ResponseWriter, r *http.Request) {
 		log.Info("Http get response [/api/config], code [%d]", res.Code)
 		w.WriteHeader(res.Code)
 		if len(res.Msg) > 0 {
-			w.Write([]byte(res.Msg))
+			_, _ = w.Write([]byte(res.Msg))
 		}
 	}()
 
@@ -251,12 +252,12 @@ func (svr *Service) apiPutConfig(w http.ResponseWriter, r *http.Request) {
 		log.Info("Http put response [/api/config], code [%d]", res.Code)
 		w.WriteHeader(res.Code)
 		if len(res.Msg) > 0 {
-			w.Write([]byte(res.Msg))
+			_, _ = w.Write([]byte(res.Msg))
 		}
 	}()
 
 	// get new config content
-	body, err := ioutil.ReadAll(r.Body)
+	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		res.Code = 400
 		res.Msg = fmt.Sprintf("read request body error: %v", err)
@@ -273,7 +274,7 @@ func (svr *Service) apiPutConfig(w http.ResponseWriter, r *http.Request) {
 
 	// get token from origin content
 	token := ""
-	b, err := ioutil.ReadFile(svr.cfgFile)
+	b, err := os.ReadFile(svr.cfgFile)
 	if err != nil {
 		res.Code = 400
 		res.Msg = err.Error()
@@ -312,7 +313,7 @@ func (svr *Service) apiPutConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	content = strings.Join(newRows, "\n")
 
-	err = ioutil.WriteFile(svr.cfgFile, []byte(content), 0644)
+	err = os.WriteFile(svr.cfgFile, []byte(content), 0o644)
 	if err != nil {
 		res.Code = 500
 		res.Msg = fmt.Sprintf("write content to frpc config file error: %v", err)

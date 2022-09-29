@@ -3,7 +3,7 @@ package plugin
 import (
 	"crypto/tls"
 	"encoding/json"
-	"io/ioutil"
+	"io"
 	"net/http"
 
 	plugin "github.com/fatedier/frp/pkg/plugin/server"
@@ -11,17 +11,17 @@ import (
 	"github.com/fatedier/frp/test/e2e/mock/server/httpserver"
 )
 
-type PluginHandler func(req *plugin.Request) *plugin.Response
+type Handler func(req *plugin.Request) *plugin.Response
 
 type NewPluginRequest func() *plugin.Request
 
-func NewHTTPPluginServer(port int, newFunc NewPluginRequest, handler PluginHandler, tlsConfig *tls.Config) *httpserver.Server {
+func NewHTTPPluginServer(port int, newFunc NewPluginRequest, handler Handler, tlsConfig *tls.Config) *httpserver.Server {
 	return httpserver.New(
 		httpserver.WithBindPort(port),
-		httpserver.WithTlsConfig(tlsConfig),
+		httpserver.WithTLSConfig(tlsConfig),
 		httpserver.WithHandler(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 			r := newFunc()
-			buf, err := ioutil.ReadAll(req.Body)
+			buf, err := io.ReadAll(req.Body)
 			if err != nil {
 				w.WriteHeader(500)
 				return
@@ -35,7 +35,7 @@ func NewHTTPPluginServer(port int, newFunc NewPluginRequest, handler PluginHandl
 			resp := handler(r)
 			buf, _ = json.Marshal(resp)
 			log.Trace("plugin response: %s", string(buf))
-			w.Write(buf)
+			_, _ = w.Write(buf)
 		})),
 	)
 }

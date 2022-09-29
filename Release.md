@@ -1,5 +1,8 @@
+### New
+
+* Use auto generated certificates if `plugin_key_path` and `plugin_crt_path` are empty for plugin `https2https` and `https2http`.
+* Server dashboard supports TLS configs.
+
 ### Fix
 
-* Plugin `https2https` not work.
-* `context canceled` problem for `http_proxy` plugin when multiple requests reuse same connection.
-* In some cases, frps can't get server name for `https` proxy.
+* xtcp error with IPv6 address.

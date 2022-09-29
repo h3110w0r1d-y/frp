@@ -2,18 +2,14 @@ package net
 
 import (
 	"errors"
-	"fmt"
 	"net"
 	"net/http"
-	"net/url"
-	"time"
+	"strconv"
 
 	"golang.org/x/net/websocket"
 )
 
-var (
-	ErrWebsocketListenerClosed = errors.New("websocket listener closed")
-)
+var ErrWebsocketListenerClosed = errors.New("websocket listener closed")
 
 const (
 	FrpWebsocketPath = "/~!frp"
@@ -23,8 +19,7 @@ type WebsocketListener struct {
 	ln       net.Listener
 	acceptCh chan net.Conn
 
-	server    *http.Server
-	httpMutex *http.ServeMux
+	server *http.Server
 }
 
 // NewWebsocketListener to handle websocket connections
@@ -49,12 +44,14 @@ func NewWebsocketListener(ln net.Listener) (wl *WebsocketListener) {
 		Handler: muxer,
 	}
 
-	go wl.server.Serve(ln)
+	go func() {
+		_ = wl.server.Serve(ln)
+	}()
 	return
 }
 
 func ListenWebsocket(bindAddr string, bindPort int) (*WebsocketListener, error) {
-	tcpLn, err := net.Listen("tcp", fmt.Sprintf("%s:%d", bindAddr, bindPort))
+	tcpLn, err := net.Listen("tcp", net.JoinHostPort(bindAddr, strconv.Itoa(bindPort)))
 	if err != nil {
 		return nil, err
 	}
@@ -76,28 +73,4 @@ func (p *WebsocketListener) Close() error {
 
 func (p *WebsocketListener) Addr() net.Addr {
 	return p.ln.Addr()
-}
-
-// addr: domain:port
-func ConnectWebsocketServer(addr string) (net.Conn, error) {
-	addr = "ws://" + addr + FrpWebsocketPath
-	uri, err := url.Parse(addr)
-	if err != nil {
-		return nil, err
-	}
-
-	origin := "http://" + uri.Host
-	cfg, err := websocket.NewConfig(addr, origin)
-	if err != nil {
-		return nil, err
-	}
-	cfg.Dialer = &net.Dialer{
-		Timeout: 10 * time.Second,
-	}
-
-	conn, err := websocket.DialConfig(cfg)
-	if err != nil {
-		return nil, err
-	}
-	return conn, nil
 }
